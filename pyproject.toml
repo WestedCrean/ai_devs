@@ -1,0 +1,25 @@
+[project]
+name = "ai-devs"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "instructor[mistral]>=1.14.5",
+    "langfuse>=4.0.1",
+    "loguru>=0.7.3",
+    "mistralai>=1.12.4",
+    "pandas>=3.0.1",
+    "polars>=1.39.3",
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.2.2",
+    "ruff>=0.15.7",
+    "typer>=0.24.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
