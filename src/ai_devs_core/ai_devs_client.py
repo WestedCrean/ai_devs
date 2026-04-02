@@ -7,6 +7,7 @@ import pathlib
 from loguru import logger
 from typing import List, Dict, Any
 import polars as pl
+from pydantic import json
 
 
 class AIDevsClient:
@@ -32,6 +33,35 @@ class AIDevsClient:
             "Accept": "application/json",
         }
 
+    def _get_api_endpoint(self, endpoint: str) -> str:
+        return self.client.get(
+            f"{self.api_url}/data/{self.api_key}/{endpoint}", headers=self._headers
+        )
+
+    def _post_api_endpoint(self, endpoint: str, body: dict) -> str:
+        body["apikey"] = self.api_key
+        if endpoint != "verify":
+            endpoint = "api/{endpoint}"
+        return self.client.post(
+            f"{self.api_url}/{endpoint}", headers=self._headers, json=body
+        )
+
+    def save_lesson_output(self, lesson_code: str, df: pl.DataFrame):
+        output_dir = pathlib.Path("./outputs")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            df.write_csv(output_dir / f"{lesson_code}.csv")
+        except Exception as e:
+            logger.info(f"Exception: {e}. Writing file to {lesson_code}.json")
+            df.write_json(output_dir / f"{lesson_code}.json")
+
+    def read_lesson_output(self, lesson_code: str) -> pl.DataFrame:
+        try:
+            return pl.read_csv("./outputs/{lesson_code}.csv")
+        except Exception:
+            logger.info(f"No csv file found. Reading {lesson_code}.json")
+            return pl.read_json(f"./outputs/{lesson_code}.json")
+
     def verify(self, task: str, data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Verify the submitted data against the specified task.
@@ -46,11 +76,9 @@ class AIDevsClient:
         Raises:
             httpx.HTTPStatusError: If the request fails.
         """
-        payload = {"apikey": self.api_key, "task": task, "answer": data}
+        payload = {"task": task, "answer": data}
 
-        response = self.client.post(
-            f"{self.api_url}/verify", json=payload, headers=self._headers
-        )
+        response = self._post_api_endpoint(endpoint="verify", body=payload)
 
         # Log the response for debugging
         logger.info(f"API Response status: {response.status_code}")
@@ -69,9 +97,8 @@ class AIDevsClient:
         except FileNotFoundError:
             pass
 
-        response = self.client.get(
-            f"{self.api_url}/data/{self.api_key}/{dataset}.csv", headers=self._headers
-        )
+        response = self._get_api_endpoint(endpoint=f"{dataset}.csv")
+
         save_path.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Saving to {file_path}")
@@ -79,6 +106,20 @@ class AIDevsClient:
             f.write(response.text)
 
         return pl.read_csv(file_path)
+
+    def get_power_plants(self) -> pl.DataFrame:
+        return self._get_api_endpoint(endpoint="findhim_locations.json")
+
+    def check_person_location(self, name: str, surname: str) -> dict:
+        return self._post_api_endpoint(
+            endpoint="location", body={"name": name, "surname": surname}
+        )
+
+    def check_person_access(self, name: str, surname: str, birthYear: int) -> dict:
+        return self._post_api_endpoint(
+            endpoint="accesslevel",
+            body={"name": name, "surname": surname, "birthYear": birthYear},
+        )
 
     def close(self):
         """Close the HTTP client session."""

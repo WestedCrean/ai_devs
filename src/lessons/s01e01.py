@@ -124,6 +124,7 @@ def main():
             pl.col("tags"),
         )
     )
+    ai_devs_core.save_lesson_output(lesson_code="s01e01", df=final_df)
 
     res = ai_devs_core.verify(task=TASK_NAME, data=final_df.to_dicts())
     logger.info(f"Response from AI_devs API: {res}")
