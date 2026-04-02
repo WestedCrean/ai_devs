@@ -34,17 +34,22 @@ class AIDevsClient:
         }
 
     def _get_api_endpoint(self, endpoint: str) -> str:
-        return self.client.get(
-            f"{self.api_url}/data/{self.api_key}/{endpoint}", headers=self._headers
-        )
+        full_endpoint_url = f"{self.api_url}/data/{self.api_key}/{endpoint}"
+        logger.info(f"GET {full_endpoint_url}")
+        return self.client.get(full_endpoint_url, headers=self._headers)
 
     def _post_api_endpoint(self, endpoint: str, body: dict) -> str:
         body["apikey"] = self.api_key
         if endpoint != "verify":
-            endpoint = "api/{endpoint}"
-        return self.client.post(
-            f"{self.api_url}/{endpoint}", headers=self._headers, json=body
-        )
+            endpoint = f"api/{endpoint}"
+
+        full_endpoint_url = f"{self.api_url}/{endpoint}"
+        logger.info(f"POST {full_endpoint_url} {body}")
+        res = self.client.post(
+            full_endpoint_url, headers=self._headers, json=body
+        ).json()
+        logger.info(f"Response: {res}")
+        return res
 
     def save_lesson_output(self, lesson_code: str, df: pl.DataFrame):
         output_dir = pathlib.Path("./outputs")
@@ -57,7 +62,7 @@ class AIDevsClient:
 
     def read_lesson_output(self, lesson_code: str) -> pl.DataFrame:
         try:
-            return pl.read_csv("./outputs/{lesson_code}.csv")
+            return pl.read_csv(f"./outputs/{lesson_code}.csv")
         except Exception:
             logger.info(f"No csv file found. Reading {lesson_code}.json")
             return pl.read_json(f"./outputs/{lesson_code}.json")
@@ -79,15 +84,12 @@ class AIDevsClient:
         payload = {"task": task, "answer": data}
 
         response = self._post_api_endpoint(endpoint="verify", body=payload)
-
-        # Log the response for debugging
-        logger.info(f"API Response status: {response.status_code}")
-        logger.info(f"API Response content: {response.text}")
-
-        response.raise_for_status()
-        return response.json()
+        return response
 
     def get_dataset(self, dataset: str, save_path: pathlib.Path) -> pl.DataFrame:
+        """
+        Download dataset .csv file from api
+        """
         # Construct full file path
         file_path = save_path / f"{dataset}.csv"
 
@@ -108,7 +110,10 @@ class AIDevsClient:
         return pl.read_csv(file_path)
 
     def get_power_plants(self) -> pl.DataFrame:
-        return self._get_api_endpoint(endpoint="findhim_locations.json")
+        """
+        Get data from findhim_locations.json
+        """
+        return self._get_api_endpoint(endpoint="findhim_locations.json").json()
 
     def check_person_location(self, name: str, surname: str) -> dict:
         return self._post_api_endpoint(
@@ -116,6 +121,9 @@ class AIDevsClient:
         )
 
     def check_person_access(self, name: str, surname: str, birthYear: int) -> dict:
+        """
+        Check person access using /accesslevel endpoint
+        """
         return self._post_api_endpoint(
             endpoint="accesslevel",
             body={"name": name, "surname": surname, "birthYear": birthYear},

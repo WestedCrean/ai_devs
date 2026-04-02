@@ -7,7 +7,7 @@ import threading
 import datetime
 from typing import List, Dict, Any, Type, Optional, Callable
 from loguru import logger
-from mistralai import Mistral
+from mistralai.client import Mistral
 from src.ai_devs_core.config import Config, BatchJobConfig
 
 
@@ -858,11 +858,11 @@ class JobClient:
             logger.info("Retrieving batch results...")
             # Get the job object which should contain results
             job_obj = self.client.batch.jobs.get(job_id=job_id)
-            
+
             # Check if results are available in the job object
-            if hasattr(job_obj, 'results') and job_obj.results:
+            if hasattr(job_obj, "results") and job_obj.results:
                 batch_results = job_obj.results
-            elif hasattr(job_obj, 'response') and hasattr(job_obj.response, 'results'):
+            elif hasattr(job_obj, "response") and hasattr(job_obj.response, "results"):
                 batch_results = job_obj.response.results
             else:
                 logger.error("No results found in batch job object")
