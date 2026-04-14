@@ -27,7 +27,12 @@ You have access to tools for reading and editing documents.
 The goals is to provide to user an output document according to his request.
 """
 
-MCP_DEFINITIONS = {"web": "http://localhost:8001/mcp", "files": "http://localhost:8002/mcp"}
+MCP_DEFINITIONS = {
+    "web": "http://localhost:8001/mcp",
+    "files": "http://localhost:8002/mcp",
+    "string": "http://localhost:8003/mcp",
+    "image": "http://localhost:8004/mcp",
+}
 
 
 _SCHEMA_TYPE_MAP = {"integer": int, "number": float, "boolean": bool, "array": list, "object": dict}

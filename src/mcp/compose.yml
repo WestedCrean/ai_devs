@@ -15,5 +15,21 @@ services:
     volumes:
       - files-data:/data/files
 
+  string-mcp:
+    build: ./string
+    ports:
+      - "8003:8000"
+    volumes:
+      - files-data:/data/files
+
+  image-mcp:
+    build: ./image
+    ports:
+      - "8004:8000"
+    volumes:
+      - files-data:/data/files
+    environment:
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+
 volumes:
   files-data:
