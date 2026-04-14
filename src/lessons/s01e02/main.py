@@ -4,7 +4,7 @@ import pydantic
 import polars as pl
 from loguru import logger
 
-from src.ai_devs_core import AIDevsClient, Config, get_config, FAgent
+from src.ai_devs_core import AIDevsClient, Config, get_config, FAgent, tool_logging
 
 TASK_NAME = "findhim"
 
@@ -42,6 +42,7 @@ def main():
     )
     db.commit()
 
+    @tool_logging
     def get_power_plants() -> pl.DataFrame:
         """Get all power plant locations as a DataFrame with city, lat, lon, code columns."""
         res = ai_devs_core.get_power_plants()
@@ -57,10 +58,12 @@ def main():
         db.commit()
         return df
 
+    @tool_logging
     def get_people() -> pl.DataFrame:
         """Get the list of suspects from the s01e01 lesson output."""
         return ai_devs_core.read_lesson_output("s01e01")
 
+    @tool_logging
     def get_person_location(name: str, surname: str) -> dict:
         """Get the location history of a person by name and surname.
 
@@ -103,27 +106,31 @@ def main():
         "Żarnowiec": (54.6306, 18.0125),
     }
 
+    @tool_logging
     def get_location_coords(location: str) -> tuple[float, float]:
         """Get location coordinates as (latitude, longitude).
 
         location: Name of the place e.g. 'Warsaw'
         """
-        if location in _KNOWN_COORDS:
-            return _KNOWN_COORDS[location]
-        # Fallback to LLM for unknown locations
-        client = FAgent("mistral-small-latest")
-        prompt = f"Return the latitude and longitude of {location}."
+
+        # if location in _KNOWN_COORDS:
+        #    return _KNOWN_COORDS[location]
+
+        client = FAgent("mistral-large-latest")
+        prompt = f"Return the latitude and longitude of {location} up to 4 digits after dot eg. 0.0000, 0.0000"
 
         class Response(pydantic.BaseModel):
             lat: float
             lon: float
 
         response = client.chat_completion(message=prompt, response_schema=Response)
+
         return (
             response.choices[0].message.parsed.lat,
             response.choices[0].message.parsed.lon,
         )
 
+    @tool_logging
     def is_location_close(
         coords1: tuple[float, float], coords2: tuple[float, float]
     ) -> bool:
@@ -162,6 +169,7 @@ def main():
         threshold = 5.0  # km
         return distance <= threshold
 
+    @tool_logging
     def check_person_access(name: str, surname: str, birth_year: int) -> dict:
         """Check the access level of a person.
 

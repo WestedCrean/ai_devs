@@ -2,6 +2,8 @@
 AIDevsClient for interacting with the AIDevs hub API.
 """
 
+import uuid
+
 import httpx
 import pathlib
 from loguru import logger
@@ -36,7 +38,7 @@ class AIDevsClient:
     def _get_api_endpoint(self, endpoint: str) -> str:
         full_endpoint_url = f"{self.api_url}/data/{self.api_key}/{endpoint}"
         logger.info(f"GET {full_endpoint_url}")
-        return self.client.get(full_endpoint_url, headers=self._headers)
+        return self.client.get(full_endpoint_url, headers=self._headers, timeout=20)
 
     def _post_api_endpoint(self, endpoint: str, body: dict) -> str:
         body["apikey"] = self.api_key
@@ -46,9 +48,8 @@ class AIDevsClient:
         full_endpoint_url = f"{self.api_url}/{endpoint}"
         logger.info(f"POST {full_endpoint_url} {body}")
         res = self.client.post(
-            full_endpoint_url, headers=self._headers, json=body
+            full_endpoint_url, headers=self._headers, json=body, timeout=20
         ).json()
-        logger.info(f"Response: {res}")
         return res
 
     def save_lesson_output(self, lesson_code: str, df: pl.DataFrame):
@@ -128,6 +129,9 @@ class AIDevsClient:
             endpoint="accesslevel",
             body={"name": name, "surname": surname, "birthYear": birthYear},
         )
+
+    def get_session_id(self) -> str:
+        return str(uuid.uuid4())
 
     def close(self):
         """Close the HTTP client session."""

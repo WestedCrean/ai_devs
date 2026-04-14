@@ -8,6 +8,7 @@ import datetime
 from typing import List, Dict, Any, Type, Optional, Callable
 from loguru import logger
 from mistralai.client import Mistral
+from mistralai.client.models.batchrequest import BatchRequest
 from src.ai_devs_core.config import Config, BatchJobConfig
 
 
@@ -402,7 +403,7 @@ class JobClient:
                 else nullcontext()
             ):
                 # Prepare batch requests
-                batch_requests = self._prepare_batch_requests(messages_list, model)
+                batch_requests = self._prepare_batch_requests(df, messages_list, model)
 
                 # Create batch job
                 try:
@@ -725,35 +726,38 @@ class JobClient:
         return merged_df
 
     def _prepare_batch_requests(
-        self, messages_list: List[List[Dict[str, str]]], model: str
-    ) -> List[Dict[str, Any]]:
+        self, df: pl.DataFrame, messages_list: List[List[Dict[str, str]]], model: str
+    ) -> List[BatchRequest]:
         """
         Prepare batch requests for Mistral API.
 
         Args:
+            df: Original DataFrame containing the id column
             messages_list: List of message lists
             model: Model to use
 
         Returns:
-            List of batch request dictionaries
+            List of BatchRequest objects
         """
         batch_requests = []
         for i, messages in enumerate(messages_list):
+            # Use the actual id from the DataFrame row, not the loop index
+            row_id = str(df["id"].to_list()[i])
             batch_requests.append(
-                {
-                    "custom_id": str(i),
-                    "body": {
+                BatchRequest(
+                    custom_id=row_id,
+                    body={
                         "model": model,
                         "messages": messages,
                         "response_format": {"type": "json_object"},
                         "max_tokens": 256,
                         "temperature": 0,
                     },
-                }
+                )
             )
         return batch_requests
 
-    def _create_batch_job(self, batch_requests: List[Dict[str, Any]], model: str):
+    def _create_batch_job(self, batch_requests: List[BatchRequest], model: str):
         """
         Create a batch job.
 
@@ -766,7 +770,7 @@ class JobClient:
         """
         logger.info(f"Launching a batch job, model={model}")
 
-        # Save batch requests to JSON file
+        # Save batch requests to JSON file (convert BatchRequest objects to dicts for serialization)
         from pathlib import Path
 
         batch_dir = Path("./data/batch_jobs")
@@ -775,8 +779,10 @@ class JobClient:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = batch_dir / f"batch_requests_{timestamp}.json"
 
+        # Convert BatchRequest objects to dictionaries for JSON serialization
+        batch_requests_dicts = [request.model_dump() for request in batch_requests]
         with open(filename, "w") as f:
-            json.dump(batch_requests, f, indent=2)
+            json.dump(batch_requests_dicts, f, indent=2)
 
         logger.info(f"Saved batch requests to {filename}")
 
@@ -860,10 +866,8 @@ class JobClient:
             job_obj = self.client.batch.jobs.get(job_id=job_id)
 
             # Check if results are available in the job object
-            if hasattr(job_obj, "results") and job_obj.results:
-                batch_results = job_obj.results
-            elif hasattr(job_obj, "response") and hasattr(job_obj.response, "results"):
-                batch_results = job_obj.response.results
+            if hasattr(job_obj, "outputs") and job_obj.outputs:
+                batch_results = job_obj.outputs
             else:
                 logger.error("No results found in batch job object")
                 raise AttributeError("Batch job results not available")
@@ -872,24 +876,38 @@ class JobClient:
             results_data = []
             for i, result in enumerate(batch_results):
                 try:
-                    response_content = result.response.choices[0].message.content
+                    # Access the response content from the nested structure
+                    # Result is a dict with 'response' -> 'body' -> 'choices' -> 'message' -> 'content'
+                    response_content = result['response']['body']['choices'][0]['message']['content']
                     response_dict = json.loads(response_content)
 
                     # Validate against schema
                     validated_response = schema(**response_dict)
                     response_data = validated_response.model_dump()
 
-                    # Add metadata
-                    response_data["_batch_id"] = i
+                    # Add metadata - use custom_id from the batch result to match with original DataFrame
+                    custom_id = result.get('custom_id', str(i))
+                    # Convert custom_id to int to match the id column type in the original DataFrame
+                    try:
+                        response_data["_batch_id"] = int(custom_id)
+                    except ValueError:
+                        response_data["_batch_id"] = custom_id
                     response_data["_success"] = True
 
                     results_data.append(response_data)
 
                 except Exception as e:
                     logger.error(f"Error processing result {i}: {e}")
-                    results_data.append(
-                        {"_batch_id": i, "_success": False, "_error": str(e)}
-                    )
+                    custom_id = result.get('custom_id', str(i))
+                    # Convert custom_id to int to match the id column type in the original DataFrame
+                    try:
+                        results_data.append(
+                            {"_batch_id": int(custom_id), "_success": False, "_error": str(e)}
+                        )
+                    except ValueError:
+                        results_data.append(
+                            {"_batch_id": custom_id, "_success": False, "_error": str(e)}
+                        )
 
             # Ensure results_data is not empty - add a placeholder if needed
             if not results_data:

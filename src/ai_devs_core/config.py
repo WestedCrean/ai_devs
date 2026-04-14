@@ -9,10 +9,15 @@ class Config(BaseModel):
     AI_DEVS_API_KEY: str
     MISTRAL_API_KEY: str
     OPENROUTER_API_KEY: str
+    OPENAI_API_KEY: str
+    OPENAI_API_BASE_URL: str = "https://openrouter.ai/api/v1"
     LANGFUSE_SECRET_KEY: str
     LANGFUSE_PUBLIC_KEY: str
     LANGFUSE_BASE_URL: str
     WANDB_API_KEY: str
+    LM_STUDIO_KEY: str
+    LM_STUDIO_URL: str
+    NGROK_AUTHTOKEN: str
 
     model_to_use: str = "mistral-small-2603"
 
