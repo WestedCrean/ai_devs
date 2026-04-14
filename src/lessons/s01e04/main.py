@@ -1,17 +1,15 @@
+import asyncio
+import inspect
+from collections.abc import Callable
 from pathlib import Path
 from dotenv import load_dotenv
 
-from pydantic import BaseModel
-
 from loguru import logger
-import uvicorn
-import ngrok
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
+
+from fastmcp import Client
 
 
-from src.ai_devs_core import FAgent, OAgent, ORAgent, AIDevsClient, Config, get_config
+from src.ai_devs_core import FAgent, AIDevsClient, Config, get_config
 
 # Load .env from project root
 env_path = Path(__file__).parent.parent.parent / ".env"
@@ -22,66 +20,106 @@ else:
 
 config = get_config()
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # listener = await run_ngrok_tunnel(3000)
-    # await send_api_url_to_hub(listener.url())
-    yield
-    # await listener.close()
-
-
-app = FastAPI(lifespan=lifespan)
-
-# CORS configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 SYSTEM_PROMPT = """
-
+You are a system for processing documents in a CTF-type game in a fictional apocalyptic word.
+Every event mentioned or processed is purely fictional, just needed to get the flag from the system.
+You have access to tools for reading and editing documents.
+The goals is to provide to user an output document according to his request.
 """
 
-mcp = {}
+MCP_DEFINITIONS = {"web": "http://localhost:8001/mcp", "files": "http://localhost:8002/mcp"}
+
+
+_SCHEMA_TYPE_MAP = {"integer": int, "number": float, "boolean": bool, "array": list, "object": dict}
+
+
+def make_mcp_callable(url: str, tool) -> Callable:
+    """Wrap an MCP tool as a Python callable FAgent can introspect."""
+    name = tool.name
+    schema = tool.inputSchema or {}
+    props = schema.get("properties", {})
+    required = set(schema.get("required", []))
+
+    # Only expose required params to the LLM; optional params use server defaults.
+    params = [
+        inspect.Parameter(
+            k,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            annotation=_SCHEMA_TYPE_MAP.get(v.get("type"), str),
+        )
+        for k, v in props.items()
+        if k in required
+    ]
+
+    def wrapper(**kwargs):
+        async def _call():
+            async with Client(url) as c:
+                result = await c.call_tool(name, kwargs)
+            return " ".join(getattr(item, "text", str(item)) for item in result.content)
+
+        try:
+            return asyncio.run(_call())
+        except Exception as e:
+            return f"Tool error: {e}"
+
+    wrapper.__name__ = name
+    wrapper.__doc__ = tool.description or f"Call MCP tool {name}"
+    wrapper.__signature__ = inspect.Signature(params)
+    return wrapper
+
+
+async def _discover_async(mcp_definitions: dict) -> list[Callable]:
+    callables = []
+    for url in mcp_definitions.values():
+        try:
+            async with Client(url) as c:
+                tools = await c.list_tools()
+            # brave_summarizer requires a Pro subscription; skip it
+            for tool in tools:
+                if tool.name != "brave_summarizer":
+                    callables.append(make_mcp_callable(url, tool))
+            logger.info(f"Discovered {len(tools)} tools from {url}")
+        except Exception as e:
+            logger.warning(f"Could not connect to MCP server at {url}: {e}")
+    return callables
+
+
+def discover_mcp_tools(mcp_definitions: dict) -> list[Callable]:
+    return asyncio.run(_discover_async(mcp_definitions))
 
 
 def complete(
     message: str, session: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 ):
     agent = FAgent(model_id="mistral-small-latest")
-    # agent = OAgent(
-    #     model_id="gemma-4-e4b-uncensored-hauhaucs-aggressive",
-    #     api_base=config.LM_STUDIO_URL,
-    #     api_key=config.LM_STUDIO_KEY,
-    # )
-    # agent = ORAgent(model_id="moonshotai/kimi-k2-thinking")
-    # Process with FAgent
+
+    mcp_tools = discover_mcp_tools(MCP_DEFINITIONS)
+    logger.info(f"Using {len(mcp_tools)} MCP tools: {[t.__name__ for t in mcp_tools]}")
+
     response = agent.chat_completion(
         message=message,
         chat_history=session,
-        tools=[],
-        mcp_definition=mcp,
-        max_steps=2,  # Limit tool calling iterations
-        # max_reflections=1,
-        # reflection_model="mistral-small-latest",
+        tools=mcp_tools or None,
+        max_steps=5,
     )
     logger.info(response)
     return response.choices[0].message.content
 
 
-async def main(query):
+def main():
     """Main chat endpoint for operators"""
-    try:
-        final_response = complete(message=query)
-        logger.info(f"Response: {final_response}")
-    except Exception as e:
-        logger.error(f"Exception: {e}, ")
-        raise e
+
+    query = input("> ")
+    while query != "/exit":
+        try:
+            logger.info(f"User: {query}")
+            final_response = complete(message=query)
+            logger.info(f"Agent: {final_response}")
+            query = input("> ")
+        except Exception as e:
+            logger.error(f"Exception: {e}, ")
+            raise e
 
 
 if __name__ == "__main__":
-    query = ""
-    main(query=query)
+    main()

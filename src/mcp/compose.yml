@@ -1,0 +1,19 @@
+services:
+  brave-search:
+    image: docker.io/mcp/brave-search
+    environment:
+      BRAVE_API_KEY: ${BRAVE_MCP_API}
+      BRAVE_MCP_TRANSPORT: http
+      BRAVE_MCP_PORT: 8080
+    ports:
+      - "8001:8080"
+
+  files-mcp:
+    build: ./files
+    ports:
+      - "8002:8000"
+    volumes:
+      - files-data:/data/files
+
+volumes:
+  files-data:
