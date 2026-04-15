@@ -458,8 +458,8 @@ class FAgent:
 
     def chat_completion(
         self,
-        message: str,
         chat_history: list[dict] = [],
+        session_manager=None,
         tools: list[Callable] | None = None,
         response_schema: Type[pydantic.BaseModel] = None,
         max_steps: int = 4,
@@ -470,122 +470,107 @@ class FAgent:
     ):
         from types import SimpleNamespace
 
-        messages = chat_history + [{"role": "user", "content": message}]
+        messages = list(chat_history)
         mistral_tools = (
             [self._generate_mistral_tool(t) for t in tools] if tools else None
         )
         tool_map = {t.__name__: t for t in tools} if tools else {}
 
-        with self.langfuse.start_as_current_observation(
-            as_type="generation",
-            name=f"mistral/{self.model_id}",
-        ) as obs:
-            obs.update(
-                input=messages,
+        client = Mistral(api_key=self.config.MISTRAL_API_KEY)
+
+        for _ in range(max_steps):
+            time.sleep(0.5)
+            kwargs = dict(
                 model=self.model_id,
-                metadata=(
-                    {"tools": [t["function"]["name"] for t in mistral_tools]}
-                    if mistral_tools
-                    else {}
-                ),
+                messages=messages,
+                reasoning_effort="high",
             )
+            if mistral_tools:
+                kwargs["tools"] = mistral_tools
+                kwargs["tool_choice"] = "auto"
 
-            client = Mistral(api_key=self.config.MISTRAL_API_KEY)
-
-            for _ in range(max_steps):
-                time.sleep(0.5)
-                kwargs = dict(
-                    model=self.model_id,
-                    messages=messages,
-                    reasoning_effort="high",
+            if stream:
+                full_content, tool_calls_list = self._stream_step(
+                    client, kwargs, on_token
                 )
-                if mistral_tools:
-                    kwargs["tools"] = mistral_tools
-                    kwargs["tool_choice"] = "auto"
-
-                if stream:
-                    full_content, tool_calls_list = self._stream_step(
-                        client, kwargs, on_token
-                    )
-                    # Build assistant message dict (SDK accepts dicts and model objects)
-                    asst_msg: dict = {
-                        "role": "assistant",
-                        "content": full_content or None,
-                    }
-                    if tool_calls_list:
-                        asst_msg["tool_calls"] = [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments
+                # Build assistant message dict (SDK accepts dicts and model objects)
+                asst_msg: dict = {
+                    "role": "assistant",
+                    "content": full_content or None,
+                }
+                if tool_calls_list:
+                    asst_msg["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": (
+                                    tc.function.arguments
                                     if isinstance(tc.function.arguments, str)
-                                    else json.dumps(tc.function.arguments),
-                                },
-                            }
-                            for tc in tool_calls_list
-                        ]
-                    messages.append(asst_msg)
-                    response = SimpleNamespace(
-                        choices=[
-                            SimpleNamespace(
-                                message=SimpleNamespace(content=full_content)
-                            )
-                        ],
-                        usage=SimpleNamespace(prompt_tokens=0, completion_tokens=0),
-                    )
-                    msg_tool_calls = tool_calls_list
-                else:
-                    response = client.chat.complete(**kwargs)
-                    msg = response.choices[0].message
-                    messages.append(msg)
-                    msg_tool_calls = msg.tool_calls
-
-                if not msg_tool_calls:
-                    break
-
-                for tc in msg_tool_calls:
-                    func = tool_map[tc.function.name]
-                    args_raw = tc.function.arguments
-                    args = (
-                        json.loads(args_raw) if isinstance(args_raw, str) else args_raw
-                    )
-                    if on_tool_call:
-                        on_tool_call(tc.function.name, args)
-                    result = func(**args)
-                    if on_tool_result:
-                        on_tool_result(tc.function.name, str(result))
-                    messages.append(
-                        ToolMessage(
-                            content=str(result),
-                            tool_call_id=tc.id,
+                                    else json.dumps(tc.function.arguments)
+                                ),
+                            },
+                        }
+                        for tc in tool_calls_list
+                    ]
+                    if session_manager:
+                        session_manager.add_tool_call_message(
+                            full_content, tool_calls_list
                         )
+                messages.append(asst_msg)
+                response = SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(message=SimpleNamespace(content=full_content))
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=0, completion_tokens=0),
+                )
+                msg_tool_calls = tool_calls_list
+            else:
+                response = client.chat.complete(**kwargs)
+                msg = response.choices[0].message
+                messages.append(msg)
+                msg_tool_calls = msg.tool_calls
+                if msg_tool_calls and session_manager:
+                    session_manager.add_tool_call_message(
+                        msg.content or "", msg_tool_calls
                     )
 
-            # Final structured output call if schema provided
-            if response_schema:
-                # chat.parse requires the last message to be user or tool,
-                # so drop the trailing assistant message from the loop.
-                last = messages[-1]
-                last_role = (
-                    last.get("role")
-                    if isinstance(last, dict)
-                    else getattr(last, "role", None)
-                )
-                parse_messages = messages[:-1] if last_role == "assistant" else messages
-                response = client.chat.parse(
-                    model=self.model_id,
-                    messages=parse_messages,
-                    response_format=response_schema,
-                )
+            if not msg_tool_calls:
+                break
 
-            obs.update(
-                output=response.choices[0].message.content,
-                usage_details={
-                    "input": response.usage.prompt_tokens,
-                    "output": response.usage.completion_tokens,
-                },
+            for tc in msg_tool_calls:
+                func = tool_map[tc.function.name]
+                args_raw = tc.function.arguments
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                if on_tool_call:
+                    on_tool_call(tc.function.name, args)
+                result = func(**args)
+                if on_tool_result:
+                    on_tool_result(tc.function.name, str(result))
+                tool_msg = ToolMessage(
+                    content=str(result),
+                    tool_call_id=tc.id,
+                )
+                messages.append(tool_msg)
+                if session_manager:
+                    session_manager.add_tool_result_message(tc.id, str(result))
+
+        # Final structured output call if schema provided
+        if response_schema:
+            # chat.parse requires the last message to be user or tool,
+            # so drop the trailing assistant message from the loop.
+            last = messages[-1]
+            last_role = (
+                last.get("role")
+                if isinstance(last, dict)
+                else getattr(last, "role", None)
+            )
+            parse_messages = messages[:-1] if last_role == "assistant" else messages
+            response = client.chat.parse(
+                model=self.model_id,
+                messages=parse_messages,
+                response_format=response_schema,
             )
 
         return response

@@ -74,10 +74,9 @@ def discover_mcp_tools(mcp_definitions: dict) -> list[Callable]:
 
 
 def complete(
-    message: str,
+    session_manager,
     agent: any,
     tools: list,
-    session: list[dict],
 ) -> str:
     first_token_seen = [False]
 
@@ -101,8 +100,8 @@ def complete(
         sys.stdout.flush()
 
     response = agent.chat_completion(
-        message=message,
-        chat_history=session,
+        chat_history=session_manager.get_messages(),
+        session_manager=session_manager,
         tools=tools,
         max_steps=15,
         on_tool_call=on_tool_call,
