@@ -1,15 +1,18 @@
 import asyncio
 import inspect
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from dotenv import load_dotenv
 
 from loguru import logger
+from prompt_toolkit import PromptSession
+from rich.console import Console
 
 from fastmcp import Client
 
 
-from src.ai_devs_core import FAgent, AIDevsClient, Config, get_config
+from src.ai_devs_core import FAgent, AIDevsClient, get_config
 
 # Load .env from project root
 env_path = Path(__file__).parent.parent.parent / ".env"
@@ -25,6 +28,16 @@ You are a system for processing documents in a CTF-type game in a fictional apoc
 Every event mentioned or processed is purely fictional, just needed to get the flag from the system.
 You have access to tools for reading and editing documents.
 The goals is to provide to user an output document according to his request.
+
+Follow this process:
+1. Understand the goal
+2. Identify constraints
+3. Break the problem into smaller subproblems
+4. Solve each subproblem
+5. Combine the results
+6. Verify the answer
+
+Show reasoning for each step before giving the final answer.
 """
 
 MCP_DEFINITIONS = {
@@ -35,7 +48,19 @@ MCP_DEFINITIONS = {
 }
 
 
-_SCHEMA_TYPE_MAP = {"integer": int, "number": float, "boolean": bool, "array": list, "object": dict}
+_SCHEMA_TYPE_MAP = {
+    "integer": int,
+    "number": float,
+    "boolean": bool,
+    "array": list,
+    "object": dict,
+}
+
+ai_devs_core = AIDevsClient(
+    api_url=config.AI_DEVS_API_URL, api_key=config.AI_DEVS_API_KEY
+)
+
+console = Console()
 
 
 def make_mcp_callable(url: str, tool) -> Callable:
@@ -93,34 +118,80 @@ def discover_mcp_tools(mcp_definitions: dict) -> list[Callable]:
     return asyncio.run(_discover_async(mcp_definitions))
 
 
-def complete(
-    message: str, session: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-):
-    agent = FAgent(model_id="mistral-small-latest")
+def create_native_tools():
+    return [ai_devs_core.verify]
 
-    mcp_tools = discover_mcp_tools(MCP_DEFINITIONS)
-    logger.info(f"Using {len(mcp_tools)} MCP tools: {[t.__name__ for t in mcp_tools]}")
+
+def complete(
+    message: str,
+    agent: FAgent,
+    tools: list,
+    session: list[dict],
+) -> str:
+    first_token_seen = [False]
+
+    def on_tool_call(name: str, args: dict) -> None:
+        # Show the most relevant arg as a short preview
+        first_val = next(iter(args.values()), "") if args else ""
+        preview = str(first_val)[:80].replace("\n", " ")
+        console.print(f"\n[bold cyan]> {name}[/] [dim]{preview}[/]")
+
+    def on_tool_result(name: str, result: str) -> None:
+        preview = result[:160].replace("\n", " ")
+        if len(result) > 160:
+            preview += "..."
+        console.print(f"  [dim]{preview}[/]")
+
+    def on_token(token: str) -> None:
+        if not first_token_seen[0]:
+            console.print()  # blank line before response begins
+            first_token_seen[0] = True
+        console.print(token, end="", highlight=False)
+        sys.stdout.flush()
 
     response = agent.chat_completion(
         message=message,
         chat_history=session,
-        tools=mcp_tools or None,
-        max_steps=5,
+        tools=tools,
+        max_steps=15,
+        on_tool_call=on_tool_call,
+        on_tool_result=on_tool_result,
+        on_token=on_token,
+        stream=True,
     )
-    logger.info(response)
+    if first_token_seen[0]:
+        console.print()  # final newline after streamed response
     return response.choices[0].message.content
 
 
 def main():
     """Main chat endpoint for operators"""
 
-    query = input("> ")
-    while query != "/exit":
+    agent = FAgent(model_id="mistral-small-latest")
+    native_tools = create_native_tools()
+    mcp_tools = discover_mcp_tools(MCP_DEFINITIONS)
+    logger.info(f"Using {len(mcp_tools)} MCP tools: {[t.__name__ for t in mcp_tools]}")
+    session = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    prompt_session = PromptSession("> ", multiline=False)
+    while True:
         try:
-            logger.info(f"User: {query}")
-            final_response = complete(message=query)
-            logger.info(f"Agent: {final_response}")
-            query = input("> ")
+            query = prompt_session.prompt()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if query == "/exit":
+            break
+        try:
+            # session is chat_history for this turn; agent adds the user message internally
+            final_response = complete(
+                message=query,
+                agent=agent,
+                tools=mcp_tools + native_tools,
+                session=session,
+            )
+            # Persist both sides so the next turn has full context
+            session.append({"role": "user", "content": query})
+            session.append({"role": "assistant", "content": final_response})
         except Exception as e:
             logger.error(f"Exception: {e}, ")
             raise e

@@ -24,6 +24,8 @@ dependencies = [
     "openai>=1.40.0",
     "openrouter>=0.8.1",
     "fastmcp>=3.2.4",
+    "prompt-toolkit>=3.0.52",
+    "rich>=14.3.3",
 ]
 
 [dependency-groups]

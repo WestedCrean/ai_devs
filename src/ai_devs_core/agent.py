@@ -9,6 +9,7 @@ import pydantic
 import polars as pl
 from mistralai.client import Mistral
 from mistralai.client.errors import SDKError
+from mistralai.client.models import ToolMessage
 from openai import OpenAI
 from openrouter import OpenRouter
 from loguru import logger
@@ -129,7 +130,6 @@ class ORAgent:
                             break
 
                         except Exception as e:
-
                             # Check if this is a retryable error
                             if ErrorClassifier.is_retryable(e):
                                 if attempt < max_retries:
@@ -434,15 +434,42 @@ class FAgent:
         os.environ["LANGFUSE_BASE_URL"] = self.config.LANGFUSE_BASE_URL
         self.langfuse = get_langfuse_client()
 
+    def _stream_step(
+        self,
+        client: Any,
+        kwargs: dict,
+        on_token: Callable[[str], None] | None,
+    ) -> tuple[str, list | None]:
+        """Stream one LLM step. Returns (full_content, tool_calls_list)."""
+        full_content = ""
+        tool_calls_list = None
+
+        with client.chat.stream(**kwargs) as s:
+            for event in s:
+                delta = event.data.choices[0].delta
+                if isinstance(delta.content, str) and delta.content:
+                    full_content += delta.content
+                    if on_token:
+                        on_token(delta.content)
+                if isinstance(delta.tool_calls, list) and delta.tool_calls:
+                    tool_calls_list = delta.tool_calls
+
+        return full_content, tool_calls_list
+
     def chat_completion(
         self,
         message: str,
         chat_history: list[dict] = [],
-        streaming_response: bool = False,
         tools: list[Callable] | None = None,
         response_schema: Type[pydantic.BaseModel] = None,
-        max_steps=4,
+        max_steps: int = 4,
+        on_tool_call: Callable[[str, dict], None] | None = None,
+        on_tool_result: Callable[[str, str], None] | None = None,
+        on_token: Callable[[str], None] | None = None,
+        stream: bool = False,
     ):
+        from types import SimpleNamespace
+
         messages = chat_history + [{"role": "user", "content": message}]
         mistral_tools = (
             [self._generate_mistral_tool(t) for t in tools] if tools else None
@@ -470,28 +497,70 @@ class FAgent:
                 kwargs = dict(
                     model=self.model_id,
                     messages=messages,
+                    reasoning_effort="high",
                 )
                 if mistral_tools:
                     kwargs["tools"] = mistral_tools
                     kwargs["tool_choice"] = "auto"
 
-                response = client.chat.complete(**kwargs)
-                msg = response.choices[0].message
-                messages.append(msg)
+                if stream:
+                    full_content, tool_calls_list = self._stream_step(
+                        client, kwargs, on_token
+                    )
+                    # Build assistant message dict (SDK accepts dicts and model objects)
+                    asst_msg: dict = {
+                        "role": "assistant",
+                        "content": full_content or None,
+                    }
+                    if tool_calls_list:
+                        asst_msg["tool_calls"] = [
+                            {
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.function.name,
+                                    "arguments": tc.function.arguments
+                                    if isinstance(tc.function.arguments, str)
+                                    else json.dumps(tc.function.arguments),
+                                },
+                            }
+                            for tc in tool_calls_list
+                        ]
+                    messages.append(asst_msg)
+                    response = SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                message=SimpleNamespace(content=full_content)
+                            )
+                        ],
+                        usage=SimpleNamespace(prompt_tokens=0, completion_tokens=0),
+                    )
+                    msg_tool_calls = tool_calls_list
+                else:
+                    response = client.chat.complete(**kwargs)
+                    msg = response.choices[0].message
+                    messages.append(msg)
+                    msg_tool_calls = msg.tool_calls
 
-                if not msg.tool_calls:
+                if not msg_tool_calls:
                     break
 
-                for tc in msg.tool_calls:
+                for tc in msg_tool_calls:
                     func = tool_map[tc.function.name]
-                    args = json.loads(tc.function.arguments)
+                    args_raw = tc.function.arguments
+                    args = (
+                        json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                    )
+                    if on_tool_call:
+                        on_tool_call(tc.function.name, args)
                     result = func(**args)
+                    if on_tool_result:
+                        on_tool_result(tc.function.name, str(result))
                     messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": str(result),
-                        }
+                        ToolMessage(
+                            content=str(result),
+                            tool_call_id=tc.id,
+                        )
                     )
 
             # Final structured output call if schema provided
@@ -639,7 +708,7 @@ Please generate an improved response incorporating the feedback:"""
             current_response_content = response.choices[0].message.content
 
             # Check if this is the final iteration or if we should continue reflecting
-            if reflection_iteration < max_reflections:
+            if reflection_iteration < max_reflections - 1:
                 # Get critique from reflection agent
                 critique = self._generate_reflection(
                     original_message=original_message,

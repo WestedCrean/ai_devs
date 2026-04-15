@@ -68,22 +68,24 @@ class AIDevsClient:
             logger.info(f"No csv file found. Reading {lesson_code}.json")
             return pl.read_json(f"./outputs/{lesson_code}.json")
 
-    def verify(self, task: str, data: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def verify(self, task: str, answer: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Verify the submitted data against the specified task.
+        Send POST {api}/verify to verify response and get flag
+        It will send it like that:
+        {
+            "apikey": <api_key>,
+            "task": <task parameter>,
+            "answer": <answer parameter>
+        }
 
         Args:
-            task: The name of the task.
-            data: List of dictionaries containing the data to send.
+            task: str - the name of the task from excercice
+            answer: dict - whatever you need to send in given task
 
         Returns:
             Dictionary containing the API response.
-
-        Raises:
-            httpx.HTTPStatusError: If the request fails.
         """
-        payload = {"task": task, "answer": data}
-
+        payload = {"task": task, "answer": answer}
         response = self._post_api_endpoint(endpoint="verify", body=payload)
         return response
 
