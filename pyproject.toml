@@ -26,6 +26,9 @@ dependencies = [
     "fastmcp>=3.2.4",
     "prompt-toolkit>=3.0.52",
     "rich>=14.3.3",
+    "duckdb>=1.5.2",
+    "mistral-common>=1.11.0",
+    "sentencepiece>=0.2.1",
 ]
 
 [dependency-groups]
