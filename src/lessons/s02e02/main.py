@@ -159,8 +159,8 @@ _GRID_ANALYSIS_PROMPT = (
 
 def _crop_grid(img: np.ndarray) -> np.ndarray:
     h, w = img.shape[:2]
-    x1, x2 = int(w * 0.25), int(w * 0.70)
-    y1, y2 = int(h * 0.20), int(h * 0.75)
+    x1, x2 = int(w * 0.28), int(w * 0.72)
+    y1, y2 = int(h * 0.13), int(h * 0.87)
     return img[y1:y2, x1:x2]
 
 
