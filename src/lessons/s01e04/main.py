@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from prompt_toolkit import PromptSession
 from rich.console import Console
+from rich.table import Table
 
 from src.ai_devs_core import (
     FAgent,
@@ -65,6 +66,8 @@ def main():
     session = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     prompt_session = PromptSession("> ", multiline=False)
+
+    table = Table(show_header=True, header_style="bold magenta")
 
     while True:
         try:

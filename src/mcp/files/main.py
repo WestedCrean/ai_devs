@@ -64,15 +64,5 @@ def delete_file(filename: str) -> str:
     return f"Deleted {filename!r}"
 
 
-@mcp.tool
-def web_fetch(url: str, filename: str) -> str:
-    """Download content from a URL and save it to a file in the storage folder."""
-    path = _safe_path(filename)
-    response = httpx.get(url, follow_redirects=True, timeout=30)
-    response.raise_for_status()
-    path.write_bytes(response.content)
-    return f"Downloaded {len(response.content)} bytes from {url!r} to {filename!r}"
-
-
 if __name__ == "__main__":
     mcp.run(transport="http", host="0.0.0.0", port=8000)

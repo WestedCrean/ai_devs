@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 from dotenv import load_dotenv
 
 from loguru import logger
@@ -53,8 +54,17 @@ ai_devs_core = AIDevsClient(
 )
 
 
+def sleep(seconds: int = 10) -> None:
+    """
+    Tool for waiting.
+
+    seconds: int - how many seconds to wait (default 10)
+    """
+    time.sleep(seconds)
+
+
 def create_native_tools():
-    return [ai_devs_core.verify]
+    return [ai_devs_core.verify, sleep]
 
 
 def main():

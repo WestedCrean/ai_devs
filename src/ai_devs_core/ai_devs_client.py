@@ -3,6 +3,7 @@ AIDevsClient for interacting with the AIDevs hub API.
 """
 
 import uuid
+import time
 
 import httpx
 import pathlib
@@ -49,7 +50,7 @@ class AIDevsClient:
         logger.info(f"POST {full_endpoint_url} {body}")
         res = self.client.post(
             full_endpoint_url, headers=self._headers, json=body, timeout=20
-        ).json()
+        )
         return res
 
     def save_lesson_output(self, lesson_code: str, df: pl.DataFrame):
@@ -68,7 +69,7 @@ class AIDevsClient:
             logger.info(f"No csv file found. Reading {lesson_code}.json")
             return pl.read_json(f"./outputs/{lesson_code}.json")
 
-    def verify(self, task: str, answer: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def verify(self, task: str, answer: Dict[str, Any]) -> Dict[str, Any]:
         """
         Send POST {api}/verify to verify response and get flag
         It will send it like that:
@@ -83,24 +84,55 @@ class AIDevsClient:
             answer: dict - whatever you need to send in given task
 
         Returns:
-            Dictionary containing the API response.
+            {
+                "status": status code,
+                "response": dictionary made from json response
+            }
         """
         payload = {"task": task, "answer": answer}
         response = self._post_api_endpoint(endpoint="verify", body=payload)
-        return response
+        result = {"status": response.status_code, "response": response.json()}
+        if response.status_code == 402:
+            result["action_required"] = (
+                "Budget exhausted. STOP immediately. Do NOT call verify again. "
+                "First call verify with answer={'prompt': 'reset'} to renew budget, "
+                "then fetch a fresh item list with get_list and restart from item 1."
+            )
+        elif response.status_code not in (200, 201, 202):
+            result["action_required"] = (
+                f"Request rejected (HTTP {response.status_code}). "
+                "Do not send more verify calls. "
+                "Read the response body carefully, revise your prompt, then retry."
+            )
+        return result
 
-    def get_dataset(self, dataset: str, save_path: pathlib.Path) -> pl.DataFrame:
+    def fetch_file(self, file_url: str) -> str:
+        """
+        Fetch file content from a given URL.
+
+        Args:
+            file_url: str - the URL of the file to fetch
+        Returns:
+            str - the content of the file
+        """
+        response = self.client.get(file_url, headers=self._headers, timeout=20)
+        response.raise_for_status()
+        return response.text
+
+    def download_dataset(
+        self, dataset: str, save_path: pathlib.Path, download_always=False
+    ) -> pathlib.Path:
         """
         Download dataset .csv file from api
         """
-        # Construct full file path
         file_path = save_path / f"{dataset}.csv"
 
         # check if dataset already was downloaded and if so, just read it
-        try:
-            return pl.read_csv(file_path)
-        except FileNotFoundError:
-            pass
+        if not download_always:
+            try:
+                return pl.read_csv(file_path)
+            except FileNotFoundError:
+                pass
 
         response = self._get_api_endpoint(endpoint=f"{dataset}.csv")
 
@@ -109,6 +141,26 @@ class AIDevsClient:
         logger.info(f"Saving to {file_path}")
         with open(file_path, "w") as f:
             f.write(response.text)
+
+        return file_path
+
+    def get_dataset(
+        self,
+        dataset: str,
+        save_path: pathlib.Path,
+        mode="dataframe",
+        download_always=False,
+    ) -> pl.DataFrame | list[str]:
+        """
+        Download dataset .csv file from api and read it in appropriate mode
+        """
+        file_path = self.download_dataset(
+            dataset=dataset, save_path=save_path, download_always=download_always
+        )
+
+        if mode == "string":
+            with open(file_path, "r") as f:
+                return f.readlines()
 
         return pl.read_csv(file_path)
 
@@ -131,6 +183,14 @@ class AIDevsClient:
             endpoint="accesslevel",
             body={"name": name, "surname": surname, "birthYear": birthYear},
         )
+
+    def sleep(seconds: int = 10) -> None:
+        """
+        Tool for waiting.
+
+        seconds: int - how many seconds to wait (default 10)
+        """
+        time.sleep(seconds)
 
     def get_session_id(self) -> str:
         return str(uuid.uuid4())
