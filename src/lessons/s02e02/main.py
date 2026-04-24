@@ -1,7 +1,5 @@
-from enum import Enum
 from pathlib import Path
 import pathlib
-import base64
 from dotenv import load_dotenv
 import httpx
 import cv2
@@ -32,13 +30,15 @@ config = get_config()
 DATA_SAVE_PATH = pathlib.Path("./data")
 
 SYSTEM_PROMPT = """
-Create a plan to solve the task, analyze it, and then implement it. You have access to mistral-large-latest model with image capabilities
+You are a state machine for puzzles.
+Below is a puzzle. Read it, retrieve current state and target state using tools. Wait for user instructions.
+After each user command, use the tool he asks for with appropriate parameters then wait for next move.
 
 Zadanie
 
 Masz do rozwiązania puzzle elektryczne na planszy 3x3 - musisz doprowadzić prąd do wszystkich trzech elektrowni (PWR6132PL, PWR1593PL, PWR7264PL), łącząc je odpowiednio ze źródłem zasilania awaryjnego (po lewej na dole). Plansza przedstawia sieć kabli - każde pole zawiera element złącza elektrycznego. Twoim celem jest doprowadzenie prądu do wszystkich elektrowni przez obrócenie odpowiednich pól planszy tak, aby układ kabli odpowiadał podanemu schematowi docelowemu. Źródłową elektrownią jest ta w lewym-dolnym rogu mapy. Okablowanie musi stanowić obwód zamknięty.
 
-Jedyna dozwolona operacja to obrót wybranego pola o 90 stopni w prawo. Możesz obracać wiele pól, ile chcesz - ale za każdy obrót płacisz jednym zapytaniem do API.
+Jedyna dozwolona operacja to obrót wybranego pola o 90 stopni. Możesz obracać wiele pól, ile chcesz - ale za każdy obrót płacisz jednym zapytaniem do API.
 
 Nazwa zadania: electricity
 Jak wygląda plansza?
@@ -83,34 +83,31 @@ https://hub.ag3nts.org/data/tutaj-twój-klucz/electricity.png?reset=1
 Co należy zrobić w zadaniu?
 
     Odczytaj aktualny stan - pobierz obrazek PNG i sprawdź w jaki kształt i jak ułożone są kable na każdym z 9 pól. 
-    Porównaj ze stanem docelowym - zweryfikuj kształt okablowania, ustal, które pola różnią się od wyglądu docelowego i ile obrotów (po 90 stopni w prawo) każde z nich potrzebuje.
+    Porównaj ze stanem docelowym - zwizualizuj stan w tabeli z polami: 'komorka' , 'ksztalt kabli' , 'stan_obecny' , 'stan_docelowy' , 'obroty_do_docelowego_stanu'
     Wyślij obroty - dla każdego pola wymagającego zmiany wyślij odpowiednią liczbę zapytań z polem rotate.
-    Sprawdź wynik - jeśli trzeba, pobierz zaktualizowany obrazek i zweryfikuj, czy plansza zgadza się ze schematem.
+    Jak zmienisz stan dla trzech komórek, zweryfikuj, czy plansza zgadza się ze schematem - 3 komórki, sprawdzenie - 3 komórki, sprawdzenie - itd. Idź iteracyjnie, rzędami.
     Odbierz flagę - gdy konfiguracja jest poprawna, hub zwraca {FLG:...}.
 
 Wskazówki
-
-    LLM nie widzi obrazka - stan planszy to plik PNG, ale agentowi trzeba podać go w takiej formie, żeby mógł nad nim rozumować. Zastanów się: w jaki sposób można opisać wygląd każdego pola słowami lub symbolami? Jak przekazać te informacje modelowi tekstowo, żeby mógł zaplanować obroty? Można próbować wysyłać obrazek bezpośrednio do modelu z możliwościami przetwarzania obrazów (vision), natomiast czy opłaca się to robić w głównej pętli agenta? Warto opisanie obrazka wydelegować do odpowiedniego narzędzia lub subagenta.
-    Problemy modeli Vision - nie wszystkie modele vision będą dobrze radziły sobie z tym zadaniem. Przetestuj które modele zwracają najlepsze wyniki. Może warto odpowiednio przygotować obraz zanim zostanie wysłany do modelu? Czy musi być wysłany w całości? Jeden z lepszych modeli do użycia to google/gemini-3-flash-preview.
-    Mechanika obrotów - każdy obrót to 90 stopni w prawo. Żeby obrócić pole "w lewo" (90 stopni w lewo), wykonaj 3 obroty w prawo. Kable na każdym polu mogą wychodzić przez różną kombinację krawędzi (lewo, prawo, góra, dół) - obrót przesuwa je zgodnie z ruchem wskazówek zegara.
+    Mechanika obrotów - każdy obrót to 90 stopni. Zweryfikuj w którą stronę. Kable na każdym polu mogą wychodzić przez różną kombinację krawędzi (lewo, prawo, góra, dół) - obrót przesuwa je zgodnie z ruchem wskazówek zegara.
     Podejście agentowe - to zadanie szczególnie dobrze nadaje się do rozwiązania przez agenta z Function Calling. Agent może samodzielnie: odczytać i zinterpretować stan mapy, porównać z celem, wyliczyć potrzebne obroty i wysłać je sekwencyjnie - bez sztywnego kodowania kolejności w kodzie.
     Weryfikuj po każdej partii obrotów - po wykonaniu kilku obrotów możesz pobrać świeży obrazek i sprawdzić, czy aktualny stan zgadza się ze schematem. Błędy w interpretacji obrazu mogą skutkować niepotrzebnymi obrotami lub koniecznością resetu.
+    Jeśli kształt komórki w stanie obecnym i docelowym się różni, pobierz jeszcze raz docelowy kształt - może się okazać że model vision się pomylił przekazując Ci kształt - w takim wypadku jeśli nie zgadza się tylko dla jednej bądź dwóch komórek, sprawdź wszystkie możliwe ułożenia kabli w nich. Jeśli api nie zwróci Ci flagi, daj mi znać.
 """
 
-
-class CableJunctionShape(str, Enum):
-    STRAIGHT = "straight"
-    ELBOW = "elbow"
-    T_JUNCTION = "t-junction"
-    CROSS = "cross"
+SYSTEM_PROMPT = """
+You are a state machine for puzzles.
+Below is a puzzle. Read it, retrieve current state and target state using tools. Wait for user instructions.
+After each user command, use the tool he asks for with appropriate parameters then wait for next move.
+"""
 
 
 class CellState(BaseModel):
     """
     Represents the state of a single cell in the grid, indicating which edges have cables.
+    True means a cable exits the cell through that edge toward the neighbouring cell.
     """
 
-    shape: CableJunctionShape
     has_left: bool
     has_right: bool
     has_top: bool
@@ -137,6 +134,39 @@ class State(BaseModel):
     cell_3x3: CellState
 
 
+def get_correct_state() -> State:
+
+    return State(
+        cell_1x1=CellState(
+            has_left=True, has_right=False, has_top=True, has_bottom=False
+        ),
+        cell_1x2=CellState(
+            has_left=False, has_right=True, has_top=True, has_bottom=True
+        ),
+        cell_1x3=CellState(
+            has_left=False, has_right=False, has_top=True, has_bottom=True
+        ),
+        cell_2x1=CellState(
+            has_left=True, has_right=True, has_top=False, has_bottom=False
+        ),
+        cell_2x2=CellState(
+            has_left=True, has_right=True, has_top=False, has_bottom=True
+        ),
+        cell_2x3=CellState(
+            has_left=True, has_right=True, has_top=False, has_bottom=True
+        ),
+        cell_3x1=CellState(
+            has_left=True, has_right=False, has_top=True, has_bottom=True
+        ),
+        cell_3x2=CellState(
+            has_left=True, has_right=False, has_top=True, has_bottom=False
+        ),
+        cell_3x3=CellState(
+            has_left=False, has_right=True, has_top=True, has_bottom=False
+        ),
+    )
+
+
 MCP_DEFINITIONS = {
     "files": "http://localhost:8002/mcp",
     "string": "http://localhost:8003/mcp",
@@ -149,55 +179,55 @@ _vision_agent = ORAgent(model_id="google/gemini-3-flash-preview")
 
 
 _GRID_ANALYSIS_PROMPT = (
-    "Analyze the electricity grid image (black-and-white, preprocessed). "
-    "The grid is 3x3. Cells are addressed as RowxCol (rows 1-3 from top, cols 1-3 from left) "
-    "For each cell determine what's the cell shape ('straight', 'elbow', 't-junction', 'cross') and therefore which edges (left, right, top, bottom) have a cable "
-    "exiting toward that edge. Also count the total number of cable exits per cell (Tip: in cells 3x1, 3x2, 3x3 the shapes are rotated compared to usual orientation but they are in fact 3x1=T, 3x2=elbow, 3x3=elbow). "
-    "(number_of_cables). Go through each cell again and verify your answer is correct. Return a structured State object. "
+    "You are analyzing an ASCII-art representation of a 3x3 electricity grid puzzle. "
+    "Each cell contains cable segments. Your only job is to determine, for each of the 9 cells, "
+    "which of its four edges (left, right, top, bottom) have a cable that exits the cell toward "
+    "the neighbouring cell in that direction. "
+    "Rules: a cable exits an edge if the line/segment in the cell visibly reaches that boundary. "
+    "Cells are addressed as RowxCol (row 1=top, row 3=bottom; col 1=left, col 3=right). "
+    "Do NOT classify shapes -- only report the four boolean edge flags per cell. "
+    "After filling in all 9 cells, re-read the ASCII art once more and verify each cell's flags "
+    "before returning the structured State object."
 )
 
 
 def _crop_grid(img: np.ndarray) -> np.ndarray:
     h, w = img.shape[:2]
-    x1, x2 = int(w * 0.28), int(w * 0.72)
-    y1, y2 = int(h * 0.13), int(h * 0.87)
+    x1, x2 = int(w * 0.28), int(w * 0.655)
+    y1, y2 = int(h * 0.21), int(h * 0.87)
     return img[y1:y2, x1:x2]
 
 
-def _preprocess(image_bytes: bytes) -> bytes:
+def _ascii_art_converter(img: np.ndarray, width: int = 90) -> str:
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
+    aspect_ratio = binary.shape[0] / binary.shape[1]
+    height = int(width * aspect_ratio * 0.5)
+    resized = cv2.resize(binary, (width, height), interpolation=cv2.INTER_AREA)
+    ascii_chars = [" ", "+"]
+    ascii_str = ""
+    for row in resized:
+        for pixel in row:
+            ascii_str += ascii_chars[1] if pixel > 0 else ascii_chars[0]
+        ascii_str += "\n"
+    return ascii_str
+
+
+def _preprocess(image_bytes: bytes) -> str:
     arr = np.frombuffer(image_bytes, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    # grid = _crop_grid(img)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    bw = cv2.adaptiveThreshold(
-        blur,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV,
-        11,
-        2,
-    )
-    kernel = np.ones((3, 3), np.uint8)
-    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
-    _, encoded = cv2.imencode(".png", bw)
-    return encoded.tobytes()
+    grid = _crop_grid(img)
+    return _ascii_art_converter(grid)
 
 
 def _analyze_grid_image(image_bytes: bytes) -> State:
-    processed = _preprocess(image_bytes)
-    b64 = base64.b64encode(processed).decode()
+    ascii_art = _preprocess(image_bytes)
     response = _vision_agent.chat_completion(
         chat_history=[
             {"role": "system", "content": _GRID_ANALYSIS_PROMPT},
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{b64}"},
-                    }
-                ],
+                "content": ascii_art,
             },
         ],
         response_schema=State,
@@ -232,7 +262,11 @@ def get_solved_state() -> State:
 
 
 def rotate_cell(cell: str) -> dict:
-    """Rotate a single cell 90 degrees clockwise on the server. cell format: 'AxB' where A=row (1-3), B=col (1-3). Example: '2x3'."""
+    """
+
+    Rotate a single cell 90 degrees on the server. cell format: 'AxB' where A=row (1-3), B=col (1-3). Example: '2x3'.
+    After rotation for exampl
+    """
     return ai_devs_core.verify("electricity", {"rotate": cell})
 
 
@@ -284,7 +318,7 @@ def simulate_rotate(cell: str) -> State:
     field = f"cell_{cell}"
     current: CellState = getattr(_sim_state, field)
     rotated_dict = compute_cell_rotation(current.model_dump())
-    rotated = CellState(**rotated_dict, number_of_cables=current.number_of_cables)
+    rotated = CellState(**rotated_dict)
     object.__setattr__(_sim_state, field, rotated)
     return _sim_state
 
@@ -308,15 +342,16 @@ def reset_simulator() -> State:
 def create_native_tools():
     return [
         get_state,
-        reset_state,
-        get_solved_state,
+        # reset_state,
+        # get_solved_state,
+        get_correct_state,
         rotate_cell,
-        compute_cell_rotation,
-        init_simulator,
-        simulate_rotate,
-        get_simulated_state,
-        reset_simulator,
-        panic_button,
+        # compute_cell_rotation,
+        # init_simulator,
+        # simulate_rotate,
+        # get_simulated_state,
+        # reset_simulator,
+        # panic_button,
     ]
 
 
@@ -324,7 +359,7 @@ def main():
     """Main chat endpoint for operators"""
     console = Console()
     agent = FAgent(
-        model_id="labs-leanstral-2603"
+        model_id="mistral-large-latest"
     )  # mistral-large-latest labs-leanstral-2603
     native_tools = create_native_tools()
     mcp_tools = discover_mcp_tools(MCP_DEFINITIONS)
