@@ -128,3 +128,4 @@ src/lessons/md/*md
 *.csv
 md/*.md
 .codex
+data

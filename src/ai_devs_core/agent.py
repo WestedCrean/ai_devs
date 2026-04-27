@@ -5,8 +5,9 @@ import inspect
 import re
 import functools
 from abc import ABC, abstractmethod
-from typing import Callable, Any, Type
+from typing import Callable, Any, Type, Literal
 import pydantic
+from enum import StrEnum
 import polars as pl
 from mistralai.client import Mistral
 from mistralai.client.errors import SDKError
@@ -19,8 +20,9 @@ from langfuse import get_client as get_langfuse_client
 from src.ai_devs_core.config import get_config
 from src.ai_devs_core.job_client import RateLimiter, ErrorClassifier
 
-MAX_TOOL_RESULT_CHARS = 12_000
-
+MISTRAL_TIMEOUT_MS = 180_000
+MISTRAL_CHAT_MAX_TOKENS = 2_000
+MAX_TOOL_RESULT_CHARS = 6_000
 
 def truncate_tool_result(result: object, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
     """Convert a tool result to bounded text for model context."""
@@ -70,7 +72,7 @@ def tool_logging(func: Callable) -> Callable:
 
 def verify_model_exists(model_id: str) -> bool:
     config = get_config()
-    client = Mistral(api_key=config.MISTRAL_API_KEY)
+    client = Mistral(api_key=config.MISTRAL_API_KEY, timeout_ms=MISTRAL_TIMEOUT_MS)
     try:
         client.models.retrieve(model_id=model_id)
         return True
@@ -110,7 +112,7 @@ class BaseAgent(ABC):
         main_desc = (
             docstring.split("\n\n")[0].replace("\n", " ").strip()
             if docstring
-            else f"Executes {func.__name__}"
+            else f"Executes {func.__name__}"  # ty:ignore[unresolved-attribute]
         )
 
         type_mapping = {
@@ -163,7 +165,7 @@ class BaseAgent(ABC):
         output_col: str,
         query: str,
         tools: list[Callable],
-        response_schema: Type[pydantic.BaseModel] = None,
+        response_schema: Type[pydantic.BaseModel] = None,  # ty:ignore[invalid-parameter-default]
     ) -> pl.DataFrame:
         """
         Runs model inference sequentially one by one on each row
@@ -215,7 +217,7 @@ class ORAgent(BaseAgent):
         openrouter_tools = (
             [self._generate_tool_definition(t) for t in tools] if tools else None
         )
-        tool_map = {t.__name__: t for t in tools} if tools else {}
+        tool_map = {t.__name__: t for t in tools} if tools else {}  # ty:ignore[unresolved-attribute]
 
         with self.langfuse.start_as_current_observation(
             as_type="generation",
@@ -340,15 +342,15 @@ class ORAgent(BaseAgent):
                         usage=parse_response.usage,
                     )
 
-            content = response.choices[0].message.content or ""
+            content = response.choices[0].message.content or ""  # ty:ignore[unresolved-attribute]
             if on_token and content:
                 on_token(content)
 
             obs.update(
                 output=content,
                 usage_details={
-                    "input": response.usage.prompt_tokens if response.usage else 0,
-                    "output": response.usage.completion_tokens if response.usage else 0,
+                    "input": response.usage.prompt_tokens if response.usage else 0,  # ty:ignore[unresolved-attribute]
+                    "output": response.usage.completion_tokens if response.usage else 0,  # ty:ignore[unresolved-attribute]
                 },
             )
 
@@ -358,9 +360,9 @@ class ORAgent(BaseAgent):
 class OAgent(BaseAgent):
     def __init__(
         self,
-        model_id: str = "gpt-3.5-turbo",
-        api_base: str = None,
-        api_key: str = None,
+        model_id: str = "gpt-4o",
+        api_base: str = None,  # ty:ignore[invalid-parameter-default]
+        api_key: str = None,  # ty:ignore[invalid-parameter-default]
     ):
         super().__init__(model_id)
         self.api_base = api_base
@@ -372,19 +374,19 @@ class OAgent(BaseAgent):
         chat_history: list[dict] = [],
         session_manager=None,
         tools: list[Callable] | None = None,
-        response_schema: Type[pydantic.BaseModel] = None,
+        response_schema: Type[pydantic.BaseModel] = None,  # ty:ignore[invalid-parameter-default]
         max_steps: int = 4,
         on_tool_call: Callable[[str, dict], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
         on_token: Callable[[str], None] | None = None,
         stream: bool = False,
         tool_max_retries: int = 5,
-    ):
+    ):  # ty:ignore[invalid-method-override]
         messages = list(chat_history)
         openai_tools = (
             [self._generate_tool_definition(t) for t in tools] if tools else None
         )
-        tool_map = {t.__name__: t for t in tools} if tools else {}
+        tool_map = {t.__name__: t for t in tools} if tools else {}  # ty:ignore[unresolved-attribute]
 
         client = OpenAI(api_key=self.api_key, base_url=self.api_base)
 
@@ -393,7 +395,7 @@ class OAgent(BaseAgent):
             if openai_tools:
                 kwargs["tools"] = openai_tools
                 kwargs["tool_choice"] = "auto"
-            response = client.chat.completions.create(**kwargs)
+            response = client.chat.completions.create(**kwargs)  # ty:ignore[no-matching-overload]
             logger.info(response)
             msg = response.choices[0].message
             messages.append(msg)
@@ -484,7 +486,7 @@ class FAgent(BaseAgent):
         )
         tool_map = {t.__name__: t for t in tools} if tools else {}
 
-        client = Mistral(api_key=self.config.MISTRAL_API_KEY)
+        client = Mistral(api_key=self.config.MISTRAL_API_KEY, timeout_ms=MISTRAL_TIMEOUT_MS)
 
         max_retries = 5
         for step in range(max_steps):
@@ -492,6 +494,8 @@ class FAgent(BaseAgent):
             kwargs = dict(
                 model=self.model_id,
                 messages=messages,
+                timeout_ms=MISTRAL_TIMEOUT_MS,
+                max_tokens=MISTRAL_CHAT_MAX_TOKENS,
             )
             if self.model_id in ("mistral-small-latest",):
                 kwargs["reasoning_effort"] = "high"
@@ -593,6 +597,8 @@ class FAgent(BaseAgent):
                 model=self.model_id,
                 messages=parse_messages,
                 response_format=response_schema,
+                timeout_ms=MISTRAL_TIMEOUT_MS,
+                max_tokens=MISTRAL_CHAT_MAX_TOKENS,
             )
 
         return response
@@ -738,3 +744,41 @@ Please generate an improved response incorporating the feedback:"""
             return schema_response
 
         return final_response
+
+DEFAULT_INTERACTIVE_AGENT_MODELS = {
+    "mistral": "mistral-small-latest",
+    "openrouter": "google/gemini-3-flash-preview",
+    "openai": "gpt-4o-mini",
+}
+
+
+class Provider(StrEnum):
+    Mistral = "mistral"
+    Openrouter = "openrouter"
+    Openai = "openai"
+
+DEFAULT_INTERACTIVE_AGENT_PROVIDER = Provider.Mistral
+
+
+def create_agent(provider : Provider | str = DEFAULT_INTERACTIVE_AGENT_PROVIDER, model_id: str = DEFAULT_INTERACTIVE_AGENT_MODELS[DEFAULT_INTERACTIVE_AGENT_PROVIDER]) -> BaseAgent:
+    """Create the main interactive lesson agent from environment settings.
+
+    Returns:
+        Configured agent for the operator chat loop.
+    """
+    config = get_config()
+    model_id = model_id or DEFAULT_INTERACTIVE_AGENT_MODELS[provider]
+
+    match(provider):
+        case Provider.Mistral:
+            return FAgent(model_id=model_id)
+        case Provider.Openrouter:
+            return ORAgent(model_id=model_id)
+        case Provider.Openai:
+            return OAgent(
+                model_id=model_id,
+                api_base=config.OPENAI_API_BASE_URL,
+                api_key=config.OPENAI_API_KEY
+                )
+        case _:
+            return FAgent(model_id=DEFAULT_INTERACTIVE_AGENT_MODELS[DEFAULT_INTERACTIVE_AGENT_PROVIDER])

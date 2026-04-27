@@ -130,7 +130,7 @@ def complete(
         chat_history=session_manager.get_messages(),
         session_manager=session_manager,
         tools=tools,
-        max_steps=100,
+        max_steps=20,
         on_tool_call=on_tool_call,
         on_tool_result=on_tool_result,
         on_token=on_token,

@@ -17,6 +17,9 @@ from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 
 from src.ai_devs_core.agent import BaseAgent
+from src.ai_devs_core.agent import MISTRAL_CHAT_MAX_TOKENS
+from src.ai_devs_core.agent import MISTRAL_TIMEOUT_MS
+from src.ai_devs_core.memory import ObservedMemory
 from src.ai_devs_core.utils import count_tokens
 
 _CONTEXT_SIZES: dict[str, int] = {
@@ -27,6 +30,8 @@ _CONTEXT_SIZES: dict[str, int] = {
     "mistral-small-4-119b": 262_144,
     "mistral-small-4-119b-2603": 262_144,
 }
+
+_MEMORY_MESSAGE_PREFIX = "<observational_memory>"
 
 
 def _to_mistral_common(msg: dict):
@@ -70,18 +75,25 @@ class SessionManager(Protocol):
     def compress(self) -> None: ...
 
 class BaseSessionManager:
-    def __init__(self, agent, system_prompt: str):
+    def __init__(
+        self,
+        agent,
+        system_prompt: str,
+        max_context_tokens: int = 20_000,
+    ):
         self._agent: BaseAgent = agent
+        self.max_context_tokens = max_context_tokens
         # Store as plain dicts - compatible with the Mistral SDK's chat methods.
         self.messages: list[dict] = [
             {"role": "system", "content": system_prompt},
         ]
 
     def get_messages(self) -> list[dict]:
-        if self.occupancy > self.context_size * 0.4:
+        if self.occupancy > self.max_context_tokens:
             logger.info(
-                "Context occupancy at %d tokens, compressing session history",
+                "Context occupancy at %d tokens exceeds %d, compressing session history",
                 self.occupancy,
+                self.max_context_tokens,
             )
             self.compress()
 
@@ -156,11 +168,16 @@ class BaseSessionManager:
             {text}
             """
 
-        client = Mistral(api_key=self._agent.config.MISTRAL_API_KEY)
+        client = Mistral(
+            api_key=self._agent.config.MISTRAL_API_KEY,
+            timeout_ms=MISTRAL_TIMEOUT_MS,
+        )
         response = client.chat.parse(
             model=self._agent.model_id,
             messages=[{"role": "system", "content": prompt}],
             response_format=SessionSummary,
+            timeout_ms=MISTRAL_TIMEOUT_MS,
+            max_tokens=MISTRAL_CHAT_MAX_TOKENS,
         )
         parsed: SessionSummary = response.choices[0].message.parsed
         parts = []
@@ -195,22 +212,70 @@ class BaseSessionManager:
         ]
 
 class RefinedSessionManager(BaseSessionManager):
-    def compress(self):
-        """Reduce context by keeping the system prompt and the 10 most recent messages.
+    def __init__(
+        self,
+        agent,
+        system_prompt: str,
+        max_context_tokens: int = 1_500,
+        recent_message_count: int = 10,
+        memory: ObservedMemory | None = None,
+    ):
+        super().__init__(
+            agent=agent,
+            system_prompt=system_prompt,
+            max_context_tokens=max_context_tokens,
+        )
+        self.recent_message_count = recent_message_count
+        self.memory = memory or ObservedMemory(current_task=system_prompt.strip())
 
-        Keeps an even tail count to avoid splitting assistant/user turn pairs.
-        """
-        if sum([count_tokens(m.content) for m in self.messages]) <= 1_500:  # ty:ignore[unresolved-attribute]
+    def compress(self) -> None:
+        """Compress older session context into observational memory."""
+        if self._message_tokens(self.messages) <= self.max_context_tokens:
             return
 
         system = self.messages[0]
-        recent = self.messages[-10:]
-        old = self.messages[1:-10]
+        session_messages = self._without_memory_messages(self.messages[1:])
+        if len(session_messages) < 3:
+            return
 
-        summary = super()._summarize(old)
+        recent_count = min(self.recent_message_count, len(session_messages))
+        recent = session_messages[-recent_count:]
+        old = session_messages[:-recent_count]
+
+        if not old and len(session_messages) > 2:
+            old = session_messages[:-2]
+            recent = session_messages[-2:]
+
+        if not old:
+            return
+
+        self.memory.observe_messages(self._agent, old)
+        self.memory.raw_messages = []
+        self.memory.reflect(self._agent)
 
         self.messages = [
             system,
-            {"role": "assistant", "content": f"Conversation memory:\n{summary}"},
+            self._memory_message(),
             *recent,
+        ]
+
+    def _memory_message(self) -> dict:
+        """Return the rendered memory block as a chat message."""
+        return {
+            "role": "assistant",
+            "content": self.memory.get_memory_state(),
+        }
+
+    @staticmethod
+    def _message_tokens(messages: list[dict]) -> int:
+        """Return approximate token count for dict-backed chat messages."""
+        return sum(count_tokens(str(message.get("content") or "")) for message in messages)
+
+    @staticmethod
+    def _without_memory_messages(messages: list[dict]) -> list[dict]:
+        """Remove previously rendered observational memory messages."""
+        return [
+            message
+            for message in messages
+            if not str(message.get("content") or "").startswith(_MEMORY_MESSAGE_PREFIX)
         ]

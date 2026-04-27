@@ -1,26 +1,33 @@
-from jsonschema.validators import create
+import os
 from pathlib import Path
 import pathlib
 
 from dotenv import load_dotenv
 
 from loguru import logger
+from pydantic import BaseModel
+from enum import StrEnum
+
 from prompt_toolkit import PromptSession
 from rich.console import Console
 from src.ai_devs_core import (
-    FAgent,
     AIDevsClient,
     get_config,
     discover_mcp_tools,
     complete,
 )
-
-from src.ai_devs_core.session import (
-    BaseSessionManager
-)
-
 from src.ai_devs_core.memory import ObservedMemory
 
+from src.ai_devs_core.session import (
+    RefinedSessionManager,
+)
+from src.ai_devs_core.agent import (
+    BaseAgent,
+    FAgent,
+    OAgent,
+    ORAgent,
+   create_agent 
+)
 from src.ai_devs_core.utils import count_tokens
 
 
@@ -35,6 +42,7 @@ config = get_config()
 DATA_SAVE_PATH = pathlib.Path("./data")
 MCP_FILES_PATH = DATA_SAVE_PATH / "mcp-files"
 TASK_NAME = "failure"
+SESSION_CONTEXT_TOKEN_LIMIT = 20_000
 
 SYSTEM_PROMPT = """
 Yesterday, a failure occurred at the power plant. 
@@ -81,6 +89,19 @@ Agent-based approach – this task lends itself well to automation with a Functi
 Important implementation detail:
 download_server_logs saves the full log file into the shared MCP files storage and returns only metadata.
 After downloading, inspect and manipulate failure.csv with MCP tools like list_files, head, tail, ripgrep, read_file, write_file, and replace.
+
+How to use ripgrep:
+- Read the metadata at the top of every ripgrep result before acting on the matches.
+- If the result says "More matches available. Call again with offset=N", then the current result is only one page. Call ripgrep again with the same pattern and filename, using offset=N, until no "More matches available" line remains or you have enough evidence for the current search.
+- If total is much larger than returned, do not assume you have seen every relevant line. Page through more results, narrow the regex, or use output_filename for broad searches.
+- For large searches, set output_filename so pages are written to a file, then inspect that file with head, tail, read_file, or more targeted ripgrep calls.
+- When collecting candidates for add_failure_observations, prefer complete log lines from all relevant pages, not only the first page of a search.
+
+Recommended tool workflow:
+- Use add_failure_observations to store newline-separated candidate log events found with search tools.
+- Use get_failure_memory_status to inspect the current candidate set.
+- Use reflect_failure_memory to compress stored candidates into a verify-ready logs payload.
+- Use verify_reflected_failure_logs to submit the stored reflected payload without copying it through chat.
 """
 
 
@@ -93,7 +114,23 @@ ai_devs_core = AIDevsClient(
     api_url=config.AI_DEVS_API_URL, api_key=config.AI_DEVS_API_KEY
 )
 
-memory = ObservedMemory()
+FAILURE_MEMORY_TASK = (
+    "Store candidate power-plant failure log events and compress them into the "
+    "verify payload format: one relevant event per line, under 1500 tokens."
+)
+failure_memory = ObservedMemory(current_task=FAILURE_MEMORY_TASK)
+reflected_failure_logs = ""
+
+
+class FailureLogCompression(BaseModel):
+    """Compressed failure log payload."""
+
+    logs: str
+
+
+def _split_log_lines(lines: str) -> list[str]:
+    """Return non-empty stripped log lines."""
+    return [line.strip() for line in lines.splitlines() if line.strip()]
 
 
 def _count_file_lines(path: pathlib.Path) -> int:
@@ -119,26 +156,119 @@ def download_server_logs() -> str:
     )
 
 
-def create_native_tools() -> list:
+def create_native_tools(memory_agent: FAgent) -> list:
     """Create native tools exposed to the lesson agent."""
+    def add_failure_observations(lines: str) -> str:
+        """Add newline-separated candidate failure log events to task memory."""
+        added = 0
+        existing = set(failure_memory.observations)
+        for line in _split_log_lines(lines):
+            if line not in existing:
+                failure_memory.add(line)
+                existing.add(line)
+                added += 1
+
+        return (
+            f"Added {added} new candidate lines. "
+            f"Stored lines: {len(failure_memory.observations)}. "
+            f"Approx tokens: {failure_memory.observation_tokens}."
+        )
+
+    def get_failure_memory_status(max_lines: int = 20) -> str:
+        """Return a preview and token count for stored candidate failure events."""
+        preview = "\n".join(failure_memory.observations[:max_lines])
+        if len(failure_memory.observations) > max_lines:
+            preview += f"\n... {len(failure_memory.observations) - max_lines} more lines"
+        return (
+            f"Stored lines: {len(failure_memory.observations)}. "
+            f"Approx tokens: {failure_memory.observation_tokens}.\n"
+            f"{preview or 'No candidate lines stored.'}"
+        )
+
+    def reflect_failure_memory(target_tokens: int = 1_500) -> str:
+        """Compress stored candidate events into verify-ready failure logs."""
+        global reflected_failure_logs
+
+        if not failure_memory.observations:
+            return "No candidate lines stored. Add lines with add_failure_observations first."
+
+        prompt = f"""
+Compress these candidate power-plant failure log events into the final verify payload.
+
+Hard requirements:
+- Put only the final logs string content in the logs field.
+- One line equals one event.
+- Preserve date in YYYY-MM-DD format, time in HH:MM, severity, and component ID.
+- Keep only events relevant to failure analysis: power, cooling, water pumps, software,
+  reactor safety systems, sensors, controllers, and directly related components.
+- Prefer CRIT, ERRO, WARN, anomalies, trips, thresholds, missing telemetry, and feedback
+  from technicians.
+- Remove duplicates and routine OK/INFO events unless they explain the failure timeline.
+- Paraphrase aggressively, but do not remove causal clues.
+- Fit within {target_tokens} tokens.
+
+Candidate lines:
+{chr(10).join(failure_memory.observations)}
+"""
+        response = memory_agent.chat_completion(
+            chat_history=[{"role": "user", "content": prompt}],
+            response_schema=FailureLogCompression,
+            max_steps=1,
+        )
+        parsed: FailureLogCompression = response.choices[0].message.parsed
+        reflected_failure_logs = parsed.logs.strip()
+        token_count = count_tokens(reflected_failure_logs)
+
+        preview = reflected_failure_logs[:1_000]
+        if len(reflected_failure_logs) > len(preview):
+            preview += "\n... preview truncated; use verify_reflected_failure_logs to submit"
+
+        return (
+            f"Reflected logs stored. Tokens: {token_count}/{target_tokens}. "
+            f"Lines: {len(_split_log_lines(reflected_failure_logs))}.\n{preview}"
+        )
+
+    def verify_reflected_failure_logs() -> str:
+        """Submit the stored reflected failure logs to Headquarters."""
+        if not reflected_failure_logs:
+            return "No reflected logs stored. Run reflect_failure_memory first."
+
+        token_count = count_tokens(reflected_failure_logs)
+        if token_count > 1_500:
+            return (
+                f"Reflected logs are {token_count} tokens, above the 1500 token limit. "
+                "Run reflect_failure_memory again with a smaller target."
+            )
+
+        return str(ai_devs_core.verify(TASK_NAME, {"logs": reflected_failure_logs}))
+
     return [
         download_server_logs,
+        add_failure_observations,
+        get_failure_memory_status,
+        reflect_failure_memory,
+        verify_reflected_failure_logs,
         count_tokens,
-        ai_devs_core.verify
+        ai_devs_core.verify,
     ]
 
 
 def main():
     """Main chat endpoint for operators"""
+    global reflected_failure_logs
+
     console = Console()
-    agent = FAgent(
-        model_id="mistral-large-latest"
-    )  # mistral-large-latest labs-leanstral-2603
-    native_tools = create_native_tools()
+    agent = create_agent("mistral", "mistral-small-latest")
+    memory_agent = FAgent(model_id="mistral-small-latest")
+    native_tools = create_native_tools(memory_agent)
     mcp_tools = discover_mcp_tools(MCP_DEFINITIONS)
     logger.info(f"Using {len(native_tools)} native tools: {[t.__name__ for t in native_tools]}")
     logger.info(f"Using {len(mcp_tools)} MCP tools: {[t.__name__ for t in mcp_tools]}")  # ty:ignore[unresolved-attribute]
-    session_manager = BaseSessionManager(agent=agent, system_prompt=SYSTEM_PROMPT)
+    session_manager = RefinedSessionManager(
+        agent=agent,
+        system_prompt=SYSTEM_PROMPT,
+        max_context_tokens=SESSION_CONTEXT_TOKEN_LIMIT,
+    )
     prompt_session = PromptSession("> ", multiline=False)
 
     while True:
@@ -150,7 +280,14 @@ def main():
             break
         elif query == "/clear":
             console.print("Clearing the conversation context")
-            session_manager = BaseSessionManager(agent=agent, system_prompt=SYSTEM_PROMPT)
+            session_manager = RefinedSessionManager(
+                agent=agent,
+                system_prompt=SYSTEM_PROMPT,
+                max_context_tokens=SESSION_CONTEXT_TOKEN_LIMIT,
+            )
+            failure_memory.observations = []
+            failure_memory.raw_messages = []
+            reflected_failure_logs = ""
         try:
             session_manager.add_user_message(query)
             final_response = complete(

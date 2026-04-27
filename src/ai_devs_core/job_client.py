@@ -7,6 +7,7 @@ import threading
 import datetime
 from typing import List, Dict, Any, Type, Optional, Callable
 from loguru import logger
+import httpx
 from mistralai.client import Mistral
 from mistralai.client.models.batchrequest import BatchRequest
 from src.ai_devs_core.config import Config, BatchJobConfig
@@ -74,6 +75,9 @@ class ErrorClassifier:
         "service unavailable",
         "internal server error",
         "gateway timeout",
+        "read operation timed out",
+        "readtimeout",
+        "timed out",
         "502",
         "503",
         "504",
@@ -100,6 +104,8 @@ class ErrorClassifier:
         Returns:
             True if the error is retryable, False otherwise
         """
+        if isinstance(error, httpx.ReadTimeout):
+            return True
         error_str = str(error).lower()
         return any(pattern in error_str for pattern in cls.RETRYABLE_ERRORS)
 
