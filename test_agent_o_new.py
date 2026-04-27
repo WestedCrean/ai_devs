@@ -3,18 +3,14 @@
 Test script for OAgent class
 """
 
-import os
 from src.ai_devs_core.agent import OAgent
-from src.ai_devs_core.config import get_config
 
 
 def test_agent_o_initialization():
     """Test that OAgent can be initialized with default model"""
-    config = get_config()
-
     # Test default initialization
     agent = OAgent()
-    assert agent.model_id == "gpt-3.5-turbo"
+    assert agent.model_id == "gpt-4o"
     print("✓ Default initialization works")
 
     # Test custom model initialization
@@ -24,8 +20,7 @@ def test_agent_o_initialization():
 
     # Test custom endpoint initialization
     agent_endpoint = OAgent(
-        model_id="gpt-3.5-turbo",
-        api_base="https://custom.endpoint.ai/v1"
+        model_id="gpt-3.5-turbo", api_base="https://custom.endpoint.ai/v1"
     )
     assert agent_endpoint.api_base == "https://custom.endpoint.ai/v1"
     print("✓ Custom endpoint initialization works")
@@ -65,7 +60,7 @@ def test_openai_tool_generation():
     # Define a simple test function
     def test_function(name: str, age: int) -> str:
         """Test function for tool generation
-        
+
         Args:
             name: The name parameter.
             age: The age parameter.

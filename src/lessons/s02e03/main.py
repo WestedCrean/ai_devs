@@ -258,7 +258,7 @@ def main():
     global reflected_failure_logs
 
     console = Console()
-    agent = create_agent("mistral", "mistral-small-latest")
+    agent = create_agent("openrouter", "google/gemini-3-flash-preview") # create_agent("mistral", "mistral-small-latest") # 
     memory_agent = FAgent(model_id="mistral-small-latest")
     native_tools = create_native_tools(memory_agent)
     mcp_tools = discover_mcp_tools(MCP_DEFINITIONS)

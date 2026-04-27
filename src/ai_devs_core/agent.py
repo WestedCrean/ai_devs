@@ -1,28 +1,31 @@
-import os
 import json
-import time
 import inspect
-import re
+import os
 import functools
+import re
+import time
 from abc import ABC, abstractmethod
-from typing import Callable, Any, Type, Literal
-import pydantic
 from enum import StrEnum
+from types import SimpleNamespace
+from typing import Any, Callable, Type
+
+import pydantic
 import polars as pl
+from langfuse import get_client as get_langfuse_client
+from loguru import logger
 from mistralai.client import Mistral
 from mistralai.client.errors import SDKError
 from mistralai.client.models import ToolMessage
 from openai import OpenAI
 from openrouter import OpenRouter
-from loguru import logger
-from langfuse import get_client as get_langfuse_client
 
 from src.ai_devs_core.config import get_config
-from src.ai_devs_core.job_client import RateLimiter, ErrorClassifier
+from src.ai_devs_core.job_client import ErrorClassifier, RateLimiter
 
 MISTRAL_TIMEOUT_MS = 180_000
 MISTRAL_CHAT_MAX_TOKENS = 2_000
 MAX_TOOL_RESULT_CHARS = 6_000
+
 
 def truncate_tool_result(result: object, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
     """Convert a tool result to bounded text for model context."""
@@ -94,10 +97,10 @@ class BaseAgent(ABC):
     @abstractmethod
     def chat_completion(
         self,
-        chat_history: list[dict] = [],
+        chat_history: list[dict] | None = None,
         session_manager=None,
         tools: list[Callable] | None = None,
-        response_schema: Type[pydantic.BaseModel] | None = None, 
+        response_schema: Type[pydantic.BaseModel] | None = None,
         max_steps: int = 4,
         on_tool_call: Callable[[str, dict], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
@@ -158,6 +161,163 @@ class BaseAgent(ABC):
             },
         }
 
+    def _tool_map(self, tools: list[Callable] | None) -> dict[str, Callable]:
+        """Return a tool-name lookup for callable tool execution."""
+        return {t.__name__: t for t in tools} if tools else {}
+
+    def _coerce_tool_arguments(self, arguments: object) -> dict:
+        """Return tool arguments as a dict from provider-specific payloads."""
+        if isinstance(arguments, str):
+            return json.loads(arguments or "{}")
+        if isinstance(arguments, dict):
+            return arguments
+        return {}
+
+    def _assistant_message_dict(self, msg: object) -> dict:
+        """Convert an assistant provider message into a dict for chat history."""
+        content = self._content_to_text(getattr(msg, "content", None))
+        tool_calls = getattr(msg, "tool_calls", None)
+        msg_dict: dict = {"role": "assistant", "content": content or None}
+        if tool_calls:
+            msg_dict["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": (
+                            tc.function.arguments
+                            if isinstance(tc.function.arguments, str)
+                            else json.dumps(tc.function.arguments)
+                        ),
+                    },
+                }
+                for tc in tool_calls
+            ]
+        return msg_dict
+
+    def _content_to_text(self, content: object) -> str:
+        """Convert provider content chunks into plain text for chat history."""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(
+                part
+                for part in (self._content_to_text(item) for item in content)
+                if part
+            )
+        if isinstance(content, dict):
+            if isinstance(content.get("text"), str):
+                return content["text"]
+            if isinstance(content.get("content"), str):
+                return content["content"]
+            if isinstance(content.get("thinking"), list):
+                return self._content_to_text(content["thinking"])
+        return str(content)
+
+    def _parse_messages(self, messages: list) -> list:
+        """Return messages suitable for a schema-only follow-up request."""
+        if not messages:
+            return messages
+        last = messages[-1]
+        last_role = (
+            last.get("role") if isinstance(last, dict) else getattr(last, "role", None)
+        )
+        return messages[:-1] if last_role == "assistant" else messages
+
+    def _execute_tool_call(
+        self,
+        tc: object,
+        tool_map: dict[str, Callable],
+        on_tool_call: Callable[[str, dict], None] | None = None,
+        on_tool_result: Callable[[str, str], None] | None = None,
+    ) -> str:
+        """Execute one provider tool call and return truncated tool content."""
+        name = tc.function.name
+        args = self._coerce_tool_arguments(tc.function.arguments)
+        if on_tool_call:
+            on_tool_call(name, args)
+        result = tool_map[name](**args)
+        tool_content = truncate_tool_result(result)
+        if on_tool_result:
+            on_tool_result(name, tool_content)
+        return tool_content
+
+    def _tool_calls_have_valid_arguments(self, tool_calls: list | None) -> bool:
+        """Return whether all tool-call arguments can be parsed."""
+        if not tool_calls:
+            return True
+        try:
+            for tc in tool_calls:
+                self._coerce_tool_arguments(tc.function.arguments)
+        except json.JSONDecodeError:
+            return False
+        return True
+
+    def _call_with_retries(
+        self,
+        call: Callable[[], Any],
+        step: int,
+        max_retries: int,
+        base_max: float = 30,
+    ) -> Any:
+        """Run one provider request with the same retry policy as FAgent."""
+        for attempt in range(max_retries + 1):
+            try:
+                return call()
+            except Exception as e:
+                if ErrorClassifier.is_retryable(e) and attempt < max_retries:
+                    delay = _retry_delay(e, attempt, base_max=base_max)
+                    logger.warning(
+                        "Retryable error step {}, attempt {}/{}: {}",
+                        step,
+                        attempt + 1,
+                        max_retries + 1,
+                        e,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+        raise RuntimeError("Retry loop exited unexpectedly")
+
+    def _emit_final_token(
+        self,
+        response: object,
+        on_token: Callable[[str], None] | None,
+    ) -> str:
+        """Emit final content once for non-streaming providers."""
+        content = self._content_to_text(response.choices[0].message.content)
+        if on_token and content:
+            on_token(content)
+        return content
+
+    def _usage_details(self, response: object) -> dict[str, int]:
+        """Return Langfuse usage details from provider response usage."""
+        usage = getattr(response, "usage", None)
+        return {
+            "input": getattr(usage, "prompt_tokens", 0) if usage else 0,
+            "output": getattr(usage, "completion_tokens", 0) if usage else 0,
+        }
+
+    def _parsed_response(
+        self,
+        response: object,
+        response_schema: Type[pydantic.BaseModel],
+    ) -> SimpleNamespace:
+        """Return a response object with message.parsed like FAgent."""
+        raw_content = response.choices[0].message.content or ""
+        parsed = response_schema.model_validate_json(raw_content)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=raw_content, parsed=parsed)
+                )
+            ],
+            usage=getattr(response, "usage", None),
+        )
+
     def run_infer_on_each_row(
         self,
         df: pl.DataFrame,
@@ -200,12 +360,16 @@ class ORAgent(BaseAgent):
     def __init__(self, model_id: str = "openai/gpt-4o"):
         super().__init__(model_id)
 
+    def _generate_openrouter_tool(self, func: Callable) -> dict[str, Any]:
+        """Convert a callable to an OpenRouter-compatible tool definition."""
+        return self._generate_tool_definition(func)
+
     def chat_completion(
         self,
-        chat_history: list[dict] = [],
+        chat_history: list[dict] | None = None,
         session_manager=None,
         tools: list[Callable] | None = None,
-        response_schema: Type[pydantic.BaseModel] = None,
+        response_schema: Type[pydantic.BaseModel] | None = None,
         max_steps: int = 15,
         on_tool_call: Callable[[str, dict], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
@@ -213,11 +377,11 @@ class ORAgent(BaseAgent):
         stream: bool = False,
         max_retries: int = 5,
     ):
-        messages = list(chat_history)
+        messages = list(chat_history or [])
         openrouter_tools = (
             [self._generate_tool_definition(t) for t in tools] if tools else None
         )
-        tool_map = {t.__name__: t for t in tools} if tools else {}  # ty:ignore[unresolved-attribute]
+        tool_map = self._tool_map(tools)
 
         with self.langfuse.start_as_current_observation(
             as_type="generation",
@@ -236,65 +400,39 @@ class ORAgent(BaseAgent):
             response = None
             with OpenRouter(api_key=self.config.OPENROUTER_API_KEY) as client:
                 for step in range(max_steps):
-                    msg = None
-                    for attempt in range(max_retries + 1):
-                        try:
-                            kwargs = dict(model=self.model_id, messages=messages)
-                            if openrouter_tools:
-                                kwargs["tools"] = openrouter_tools
-                                kwargs["tool_choice"] = "auto"
+                    kwargs = dict(
+                        model=self.model_id,
+                        messages=list(messages),
+                        max_tokens=MISTRAL_CHAT_MAX_TOKENS,
+                    )
+                    if openrouter_tools:
+                        kwargs["tools"] = openrouter_tools
+                        kwargs["tool_choice"] = "auto"
 
-                            response = client.chat.send(**kwargs)
-                            msg = response.choices[0].message
+                    response = self._call_with_retries(
+                        lambda: client.chat.send(**kwargs),
+                        step=step,
+                        max_retries=max_retries,
+                        base_max=10,
+                    )
+                    msg = response.choices[0].message
+                    messages.append(self._assistant_message_dict(msg))
+                    msg_tool_calls = getattr(msg, "tool_calls", None)
+                    if msg_tool_calls and session_manager:
+                        session_manager.add_tool_call_message(
+                            msg.content or "", msg_tool_calls
+                        )
 
-                            msg_dict: dict = {
-                                "role": "assistant",
-                                "content": msg.content or None,
-                            }
-                            if msg.tool_calls:
-                                msg_dict["tool_calls"] = [
-                                    {
-                                        "id": tc.id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": tc.function.name,
-                                            "arguments": tc.function.arguments,
-                                        },
-                                    }
-                                    for tc in msg.tool_calls
-                                ]
-                                if session_manager:
-                                    session_manager.add_tool_call_message(
-                                        msg.content or "", msg.tool_calls
-                                    )
-                            messages.append(msg_dict)
-                            break
-
-                        except Exception as e:
-                            if (
-                                ErrorClassifier.is_retryable(e)
-                                and attempt < max_retries
-                            ):
-                                delay = _retry_delay(e, attempt, base_max=10)
-                                logger.warning(
-                                    f"Retryable error step {step}, attempt {attempt + 1}/{max_retries + 1}: {e}"
-                                )
-                                time.sleep(delay)
-                                continue
-                            raise
-
-                    if msg is None or not msg.tool_calls:
+                    if not msg_tool_calls:
                         break
 
-                    for tc in msg.tool_calls:
-                        func = tool_map[tc.function.name]
-                        args = json.loads(tc.function.arguments)
-                        if on_tool_call:
-                            on_tool_call(tc.function.name, args)
-                        result = func(**args)
-                        tool_content = truncate_tool_result(result)
-                        if on_tool_result:
-                            on_tool_result(tc.function.name, tool_content)
+                    for tc in msg_tool_calls:
+                        tool_content = self._execute_tool_call(
+                            tc,
+                            tool_map,
+                            on_tool_call=on_tool_call,
+                            on_tool_result=on_tool_result,
+                        )
                         messages.append(
                             {
                                 "role": "tool",
@@ -306,52 +444,30 @@ class ORAgent(BaseAgent):
                             session_manager.add_tool_result_message(tc.id, tool_content)
 
                 if response_schema:
-                    from types import SimpleNamespace
-
-                    last = messages[-1]
-                    last_role = (
-                        last.get("role")
-                        if isinstance(last, dict)
-                        else getattr(last, "role", None)
-                    )
-                    parse_messages = (
-                        messages[:-1] if last_role == "assistant" else messages
-                    )
-                    parse_response = client.chat.send(
-                        model=self.model_id,
-                        messages=parse_messages,
-                        max_tokens=8000,
-                        response_format={
-                            "type": "json_schema",
-                            "json_schema": {
-                                "name": response_schema.__name__,
-                                "schema": response_schema.model_json_schema(),
+                    parse_response = self._call_with_retries(
+                        lambda: client.chat.send(
+                            model=self.model_id,
+                            messages=list(self._parse_messages(messages)),
+                            max_tokens=MISTRAL_CHAT_MAX_TOKENS,
+                            response_format={
+                                "type": "json_schema",
+                                "json_schema": {
+                                    "name": response_schema.__name__,
+                                    "schema": response_schema.model_json_schema(),
+                                },
                             },
-                        },
+                        ),
+                        step=max_steps,
+                        max_retries=max_retries,
+                        base_max=10,
                     )
-                    raw_content = parse_response.choices[0].message.content or ""
-                    parsed = response_schema.model_validate_json(raw_content)
-                    response = SimpleNamespace(
-                        choices=[
-                            SimpleNamespace(
-                                message=SimpleNamespace(
-                                    content=raw_content, parsed=parsed
-                                )
-                            )
-                        ],
-                        usage=parse_response.usage,
-                    )
+                    response = self._parsed_response(parse_response, response_schema)
 
-            content = response.choices[0].message.content or ""  # ty:ignore[unresolved-attribute]
-            if on_token and content:
-                on_token(content)
+            content = self._emit_final_token(response, on_token)
 
             obs.update(
                 output=content,
-                usage_details={
-                    "input": response.usage.prompt_tokens if response.usage else 0,  # ty:ignore[unresolved-attribute]
-                    "output": response.usage.completion_tokens if response.usage else 0,  # ty:ignore[unresolved-attribute]
-                },
+                usage_details=self._usage_details(response),
             )
 
         return response
@@ -369,49 +485,66 @@ class OAgent(BaseAgent):
         self.api_key = api_key
         self.rate_limiter = RateLimiter(rate=4, max_tokens=2000)
 
+    def _generate_openai_tool(self, func: Callable) -> dict[str, Any]:
+        """Convert a callable to an OpenAI-compatible tool definition."""
+        return self._generate_tool_definition(func)
+
     def chat_completion(
         self,
-        chat_history: list[dict] = [],
+        chat_history: list[dict] | None = None,
         session_manager=None,
         tools: list[Callable] | None = None,
-        response_schema: Type[pydantic.BaseModel] = None,  # ty:ignore[invalid-parameter-default]
+        response_schema: Type[pydantic.BaseModel] | None = None,
         max_steps: int = 4,
         on_tool_call: Callable[[str, dict], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
         on_token: Callable[[str], None] | None = None,
         stream: bool = False,
-        tool_max_retries: int = 5,
-    ):  # ty:ignore[invalid-method-override]
-        messages = list(chat_history)
+        max_retries: int = 5,
+    ):
+        messages = list(chat_history or [])
         openai_tools = (
             [self._generate_tool_definition(t) for t in tools] if tools else None
         )
-        tool_map = {t.__name__: t for t in tools} if tools else {}  # ty:ignore[unresolved-attribute]
+        tool_map = self._tool_map(tools)
 
-        client = OpenAI(api_key=self.api_key, base_url=self.api_base)
+        client = OpenAI(
+            api_key=self.api_key or self.config.OPENAI_API_KEY,
+            base_url=self.api_base,
+        )
+        response = None
 
-        for _ in range(max_steps):
-            kwargs = dict(model=self.model_id, messages=messages)
+        for step in range(max_steps):
+            kwargs = dict(
+                model=self.model_id,
+                messages=list(messages),
+                max_tokens=MISTRAL_CHAT_MAX_TOKENS,
+            )
             if openai_tools:
                 kwargs["tools"] = openai_tools
                 kwargs["tool_choice"] = "auto"
-            response = client.chat.completions.create(**kwargs)  # ty:ignore[no-matching-overload]
+            response = self._call_with_retries(
+                lambda: client.chat.completions.create(**kwargs),
+                step=step,
+                max_retries=max_retries,
+            )
             logger.info(response)
             msg = response.choices[0].message
-            messages.append(msg)
+            messages.append(self._assistant_message_dict(msg))
+            msg_tool_calls = getattr(msg, "tool_calls", None)
+            if msg_tool_calls and session_manager:
+                session_manager.add_tool_call_message(msg.content or "", msg_tool_calls)
 
-            if not msg.tool_calls:
+            if not msg_tool_calls:
                 break
 
-            for tc in msg.tool_calls:
-                func = tool_map[tc.function.name]
-                args = json.loads(tc.function.arguments)
-                if on_tool_call:
-                    on_tool_call(tc.function.name, args)
-                result = func(**args)
-                tool_content = truncate_tool_result(result)
-                if on_tool_result:
-                    on_tool_result(tc.function.name, tool_content)
+            for tc in msg_tool_calls:
+                tool_content = self._execute_tool_call(
+                    tc,
+                    tool_map,
+                    on_tool_call=on_tool_call,
+                    on_tool_result=on_tool_result,
+                )
                 messages.append(
                     {
                         "role": "tool",
@@ -419,22 +552,29 @@ class OAgent(BaseAgent):
                         "content": tool_content,
                     }
                 )
+                if session_manager:
+                    session_manager.add_tool_result_message(tc.id, tool_content)
 
         if response_schema:
-            last = messages[-1]
-            last_role = (
-                last.get("role")
-                if isinstance(last, dict)
-                else getattr(last, "role", None)
+            schema_response = self._call_with_retries(
+                lambda: client.chat.completions.create(
+                    model=self.model_id,
+                    messages=list(self._parse_messages(messages)),
+                    max_tokens=MISTRAL_CHAT_MAX_TOKENS,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": response_schema.__name__,
+                            "schema": response_schema.model_json_schema(),
+                        },
+                    },
+                ),
+                step=max_steps,
+                max_retries=max_retries,
             )
-            parse_messages = messages[:-1] if last_role == "assistant" else messages
-            schema_response = client.chat.completions.create(
-                model=self.model_id,
-                messages=parse_messages,
-                response_format={"type": "json_object"},
-            )
-            return schema_response
+            response = self._parsed_response(schema_response, response_schema)
 
+        self._emit_final_token(response, on_token)
         return response
 
 
@@ -510,6 +650,22 @@ class FAgent(BaseAgent):
                         full_content, tool_calls_list = self._stream_step(
                             client, kwargs, on_token
                         )
+                        if not self._tool_calls_have_valid_arguments(tool_calls_list):
+                            logger.warning(
+                                "Streamed tool-call arguments were incomplete at "
+                                "step {}; retrying the step without streaming",
+                                step,
+                            )
+                            response = client.chat.complete(**kwargs)
+                            msg = response.choices[0].message
+                            messages.append(self._assistant_message_dict(msg))
+                            msg_tool_calls = msg.tool_calls
+                            if msg_tool_calls and session_manager:
+                                session_manager.add_tool_call_message(
+                                    msg.content or "", msg_tool_calls
+                                )
+                            break
+
                         asst_msg: dict = {
                             "role": "assistant",
                             "content": full_content or None,
@@ -547,7 +703,7 @@ class FAgent(BaseAgent):
                     else:
                         response = client.chat.complete(**kwargs)
                         msg = response.choices[0].message
-                        messages.append(msg)
+                        messages.append(self._assistant_message_dict(msg))
                         msg_tool_calls = msg.tool_calls
                         if msg_tool_calls and session_manager:
                             session_manager.add_tool_call_message(
@@ -570,7 +726,7 @@ class FAgent(BaseAgent):
             for tc in msg_tool_calls:
                 func = tool_map[tc.function.name]
                 args_raw = tc.function.arguments
-                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+                args = self._coerce_tool_arguments(args_raw)
                 if on_tool_call:
                     on_tool_call(tc.function.name, args)
                 result = func(**args)

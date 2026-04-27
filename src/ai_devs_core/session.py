@@ -34,6 +34,26 @@ _CONTEXT_SIZES: dict[str, int] = {
 _MEMORY_MESSAGE_PREFIX = "<observational_memory>"
 
 
+def _content_to_text(content: object) -> str:
+    """Convert provider content chunks into plain text for stored history."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            part for part in (_content_to_text(item) for item in content) if part
+        )
+    if isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            return content["text"]
+        if isinstance(content.get("content"), str):
+            return content["content"]
+        if isinstance(content.get("thinking"), list):
+            return _content_to_text(content["thinking"])
+    return str(content)
+
+
 def _to_mistral_common(msg: dict):
     """Convert a message dict to a mistral_common message object for tokenization."""
     role = msg["role"]
@@ -58,6 +78,18 @@ def _to_mistral_common(msg: dict):
     if role == "tool":
         return ToolMessage(content=msg["content"], tool_call_id=msg.get("tool_call_id"))
     raise ValueError(f"Unknown role: {role}")
+
+
+def _normalize_message(msg: dict) -> dict:
+    """Return a Mistral-valid dict-backed chat message."""
+    if msg.get("role") == "assistant" and msg.get("tool_calls"):
+        return {**msg, "content": None}
+    if "content" in msg:
+        content = _content_to_text(msg.get("content"))
+        if msg.get("role") == "assistant" and not content:
+            content = "[non-text assistant content omitted]"
+        return {**msg, "content": content}
+    return msg
 
 
 class SessionSummary(BaseModel):
@@ -89,6 +121,7 @@ class BaseSessionManager:
         ]
 
     def get_messages(self) -> list[dict]:
+        self._normalize_messages()
         if self.occupancy > self.max_context_tokens:
             logger.info(
                 "Context occupancy at %d tokens exceeds %d, compressing session history",
@@ -99,18 +132,28 @@ class BaseSessionManager:
 
         return self.messages
 
-    def add_user_message(self, msg: str):
-        self.messages.append({"role": "user", "content": msg})
+    def _normalize_messages(self) -> None:
+        """Normalize stored chat history before tokenization or provider calls."""
+        self.messages = [_normalize_message(message) for message in self.messages]
 
-    def add_agent_message(self, msg: str):
-        self.messages.append({"role": "assistant", "content": msg})
+    def add_user_message(self, msg: str):
+        self.messages.append({"role": "user", "content": _content_to_text(msg)})
+
+    def add_agent_message(self, msg: object):
+        self.messages.append(
+            {
+                "role": "assistant",
+                "content": _content_to_text(msg)
+                or "[non-text assistant content omitted]",
+            }
+        )
 
     def add_tool_call_message(self, full_content: str, tool_calls_list: list):
         """Append the assistant message that requested tool calls."""
         self.messages.append(
             {
                 "role": "assistant",
-                "content": full_content or None,
+                "content": None,
                 "tool_calls": [
                     {
                         "id": tc.id,
@@ -143,6 +186,7 @@ class BaseSessionManager:
     @property
     def occupancy(self) -> int:
         """Return the number of tokens currently used by this session."""
+        self._normalize_messages()
         tokenizer = MistralTokenizer.v3()
         mistral_messages = [_to_mistral_common(m) for m in self.messages]
         # continue_final_message=True avoids the validator rejecting assistant-last sessions.

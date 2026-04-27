@@ -3,18 +3,14 @@
 Test script for ORAgent class
 """
 
-import os
 from src.ai_devs_core.agent import ORAgent
-from src.ai_devs_core.config import get_config
 
 
 def test_agent_o_initialization():
     """Test that ORAgent can be initialized with default model"""
-    config = get_config()
-
     # Test default initialization
     agent = ORAgent()
-    assert agent.model_id == "openai/gpt-5.2"
+    assert agent.model_id == "openai/gpt-4o"
     print("✓ Default initialization works")
 
     # Test custom model initialization

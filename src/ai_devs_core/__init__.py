@@ -15,6 +15,7 @@ __all__ = [
     "FAgent",
     "OAgent",
     "ORAgent",
+    "create_agent",
     "tool_logging",
     "complete",
     "discover_mcp_tools",
