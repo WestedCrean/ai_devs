@@ -5,8 +5,6 @@ from dotenv import load_dotenv
 from loguru import logger
 from prompt_toolkit import PromptSession
 from rich.console import Console
-from rich.table import Table
-
 from src.ai_devs_core import (
     FAgent,
     AIDevsClient,
@@ -75,12 +73,14 @@ def main():
     agent = FAgent(model_id="mistral-small-latest")
     native_tools = create_native_tools()
     mcp_tools = discover_mcp_tools(MCP_DEFINITIONS)
-    logger.info(f"Using {len(mcp_tools)} MCP tools: {[t.__name__ for t in mcp_tools]}")
+    logger.info(
+        "Using %d MCP tools: %s",
+        len(mcp_tools),
+        [getattr(t, "__name__", "tool") for t in mcp_tools],
+    )
     session_manager = BaseSessionManager(agent=agent, system_prompt=SYSTEM_PROMPT)
 
     prompt_session = PromptSession("> ", multiline=False)
-
-    table = Table(show_header=True, header_style="bold magenta")
 
     while True:
         try:

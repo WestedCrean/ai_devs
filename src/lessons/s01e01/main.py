@@ -126,7 +126,7 @@ def main():
     )
     ai_devs_core.save_lesson_output(lesson_code="s01e01", df=final_df)
 
-    res = ai_devs_core.verify(task=TASK_NAME, data=final_df.to_dicts())
+    res = ai_devs_core.verify(task=TASK_NAME, answer={"data": final_df.to_dicts()})
     logger.info(f"Response from AI_devs API: {res}")
     return
 

@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import sys
+from typing import Any
 from loguru import logger
 from collections.abc import Callable
 from rich.console import Console
@@ -76,7 +77,7 @@ def _make_mcp_callable(url: str, tool) -> Callable:
 
     wrapper.__name__ = name
     wrapper.__doc__ = tool.description or f"Call MCP tool {name}"
-    wrapper.__signature__ = inspect.Signature(params)
+    wrapper.__signature__ = inspect.Signature(params)  # ty:ignore[unresolved-attribute]
     return wrapper
 
 
@@ -102,8 +103,8 @@ def discover_mcp_tools(mcp_definitions: dict) -> list[Callable]:
 
 def complete(
     session_manager: SessionManager,
-    agent: any,
-    tools: list,
+    agent: Any,
+    tools: list[Callable],
 ) -> str:
     first_token_seen = [False]
 

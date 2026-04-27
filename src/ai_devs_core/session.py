@@ -1,7 +1,7 @@
 import json
 from loguru import logger
 from pydantic import BaseModel
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from mistralai.client import Mistral
 
@@ -45,12 +45,13 @@ def _content_to_text(content: object) -> str:
             part for part in (_content_to_text(item) for item in content) if part
         )
     if isinstance(content, dict):
-        if isinstance(content.get("text"), str):
-            return content["text"]
-        if isinstance(content.get("content"), str):
-            return content["content"]
-        if isinstance(content.get("thinking"), list):
-            return _content_to_text(content["thinking"])
+        data = cast(dict[str, Any], content)
+        if isinstance(data.get("text"), str):
+            return data["text"]
+        if isinstance(data.get("content"), str):
+            return data["content"]
+        if isinstance(data.get("thinking"), list):
+            return _content_to_text(data["thinking"])
     return str(content)
 
 
@@ -98,9 +99,10 @@ class SessionSummary(BaseModel):
     decisions: list[str] = []
     plans: list[str] = []
 
+
 class SessionManager(Protocol):
     def get_messages(self) -> list[dict]: ...
-    def add_user_message(self, msg:str) -> None: ...
+    def add_user_message(self, msg: str) -> None: ...
     def add_agent_message(self, msg: str) -> None: ...
     def add_tool_call_message(self, full_content: str, tool_calls_list: list) -> None: ...
     def add_tool_result_message(self, tool_call_id: str, content: str) -> None: ...
@@ -136,10 +138,10 @@ class BaseSessionManager:
         """Normalize stored chat history before tokenization or provider calls."""
         self.messages = [_normalize_message(message) for message in self.messages]
 
-    def add_user_message(self, msg: str):
+    def add_user_message(self, msg: str) -> None:
         self.messages.append({"role": "user", "content": _content_to_text(msg)})
 
-    def add_agent_message(self, msg: object):
+    def add_agent_message(self, msg: object) -> None:
         self.messages.append(
             {
                 "role": "assistant",
@@ -148,7 +150,7 @@ class BaseSessionManager:
             }
         )
 
-    def add_tool_call_message(self, full_content: str, tool_calls_list: list):
+    def add_tool_call_message(self, full_content: str, tool_calls_list: list) -> None:
         """Append the assistant message that requested tool calls."""
         self.messages.append(
             {
@@ -172,7 +174,7 @@ class BaseSessionManager:
             }
         )
 
-    def add_tool_result_message(self, tool_call_id: str, content: str):
+    def add_tool_result_message(self, tool_call_id: str, content: str) -> None:
         """Append a tool result message."""
         self.messages.append(
             {"role": "tool", "tool_call_id": tool_call_id, "content": content}
@@ -223,7 +225,10 @@ class BaseSessionManager:
             timeout_ms=MISTRAL_TIMEOUT_MS,
             max_tokens=MISTRAL_CHAT_MAX_TOKENS,
         )
-        parsed: SessionSummary = response.choices[0].message.parsed
+        response_any = cast(Any, response)
+        parsed = response_any.choices[0].message.parsed
+        if parsed is None:
+            return ""
         parts = []
         if parsed.goals:
             parts.append("Goals: " + "; ".join(parsed.goals))
@@ -235,7 +240,7 @@ class BaseSessionManager:
             parts.append("Plans: " + "; ".join(parsed.plans))
         return "\n".join(parts)
 
-    def compress(self):
+    def compress(self) -> None:
         """Reduce context by keeping the system prompt and the 10 most recent messages.
 
         Keeps an even tail count to avoid splitting assistant/user turn pairs.

@@ -70,11 +70,9 @@ def main():
         name: First name of the person.
         surname: Last name of the person.
         """
-        result = ai_devs_core.check_person_location(name=name, surname=surname)
+        result = ai_devs_core.check_person_location(name=name, surname=surname).json()
         # debugging output into sqlite for visualisation
-        coords_list = (
-            result if isinstance(result, list) else result.get("locations", [])
-        )
+        coords_list = result.get("locations", [])
         for entry in coords_list:
             if isinstance(entry, str):
                 parts = entry.strip("() ").split(",")
@@ -123,7 +121,10 @@ def main():
             lat: float
             lon: float
 
-        response = client.chat_completion(message=prompt, response_schema=Response)
+        response = client.chat_completion(
+            chat_history=[{"role": "user", "content": prompt}],
+            response_schema=Response,
+        )
 
         return (
             response.choices[0].message.parsed.lat,
@@ -179,9 +180,9 @@ def main():
         """
         result = ai_devs_core.check_person_access(
             name=name, surname=surname, birthYear=birth_year
-        )
+        ).json()
         # debugging output into sqlite for visualisation
-        access_level = result.get("accessLevel") if isinstance(result, dict) else None
+        access_level = result.get("accessLevel")
         db.execute(
             "INSERT INTO person_access (name, surname, birth_year, access_level) VALUES (?, ?, ?, ?)",
             (name, surname, birth_year, access_level),
@@ -252,7 +253,7 @@ def main():
     )
 
     logger.info(output)
-    ai_devs_core.verify(task=TASK_NAME, data=dict(output))
+    ai_devs_core.verify(task=TASK_NAME, answer=dict(output))
     db.close()
     return
 

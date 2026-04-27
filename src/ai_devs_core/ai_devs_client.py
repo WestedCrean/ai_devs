@@ -164,7 +164,7 @@ class AIDevsClient:
         save_path: pathlib.Path,
         mode="dataframe",
         download_always=False,
-    ) -> pl.DataFrame | list[str]:
+    ) -> pl.DataFrame:
         """
         Download dataset .csv file from api and read it in appropriate mode
         """
@@ -175,7 +175,7 @@ class AIDevsClient:
 
         if mode == "string":
             with open(file_path, "r") as f:
-                return f.readlines()
+                return pl.DataFrame({"line": f.readlines()})
 
         return pl.read_csv(file_path)
 
@@ -212,7 +212,7 @@ class AIDevsClient:
 
         return pl.read_csv(file_path)
 
-    def get_power_plants(self) -> pl.DataFrame:
+    def get_power_plants(self) -> dict[str, Any]:
         """
         Get data from findhim_locations.json
         """
@@ -223,7 +223,7 @@ class AIDevsClient:
             endpoint="location", body={"name": name, "surname": surname}
         )
 
-    def check_person_access(self, name: str, surname: str, birthYear: int) ->  httpx.Response:
+    def check_person_access(self, name: str, surname: str, birthYear: int) -> httpx.Response:
         """
         Check person access using /accesslevel endpoint
         """

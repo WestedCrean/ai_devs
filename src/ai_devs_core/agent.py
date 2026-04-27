@@ -7,7 +7,7 @@ import time
 from abc import ABC, abstractmethod
 from enum import StrEnum
 from types import SimpleNamespace
-from typing import Any, Callable, Type
+from typing import Any, Callable, Type, cast
 
 import pydantic
 import polars as pl
@@ -67,7 +67,9 @@ def tool_logging(func: Callable) -> Callable:
         params = ", ".join(
             [repr(a) for a in args] + [f"{k}={repr(v)}" for k, v in kwargs.items()]
         )
-        logger.info(f"tool call: {func.__name__}({params}) -> {result}")  # ty:ignore[unresolved-attribute]
+        logger.info(
+            f"tool call: {getattr(func, '__name__', 'tool')}({params}) -> {result}"
+        )
         return result
 
     return wrapper
@@ -115,7 +117,7 @@ class BaseAgent(ABC):
         main_desc = (
             docstring.split("\n\n")[0].replace("\n", " ").strip()
             if docstring
-            else f"Executes {func.__name__}"  # ty:ignore[unresolved-attribute]
+            else f"Executes {getattr(func, '__name__', 'tool')}"
         )
 
         type_mapping = {
@@ -151,7 +153,7 @@ class BaseAgent(ABC):
         return {
             "type": "function",
             "function": {
-                "name": func.__name__,
+                "name": getattr(func, "__name__", "tool"),
                 "description": main_desc,
                 "parameters": {
                     "type": "object",
@@ -163,7 +165,7 @@ class BaseAgent(ABC):
 
     def _tool_map(self, tools: list[Callable] | None) -> dict[str, Callable]:
         """Return a tool-name lookup for callable tool execution."""
-        return {t.__name__: t for t in tools} if tools else {}
+        return {getattr(t, "__name__", "tool"): t for t in tools} if tools else {}
 
     def _coerce_tool_arguments(self, arguments: object) -> dict:
         """Return tool arguments as a dict from provider-specific payloads."""
@@ -209,12 +211,13 @@ class BaseAgent(ABC):
                 if part
             )
         if isinstance(content, dict):
-            if isinstance(content.get("text"), str):
-                return content["text"]
-            if isinstance(content.get("content"), str):
-                return content["content"]
-            if isinstance(content.get("thinking"), list):
-                return self._content_to_text(content["thinking"])
+            data = cast(dict[str, Any], content)
+            if isinstance(data.get("text"), str):
+                return data["text"]
+            if isinstance(data.get("content"), str):
+                return data["content"]
+            if isinstance(data.get("thinking"), list):
+                return self._content_to_text(data["thinking"])
         return str(content)
 
     def _parse_messages(self, messages: list) -> list:
@@ -235,8 +238,9 @@ class BaseAgent(ABC):
         on_tool_result: Callable[[str, str], None] | None = None,
     ) -> str:
         """Execute one provider tool call and return truncated tool content."""
-        name = tc.function.name
-        args = self._coerce_tool_arguments(tc.function.arguments)
+        tool_call = cast(Any, tc)
+        name = tool_call.function.name
+        args = self._coerce_tool_arguments(tool_call.function.arguments)
         if on_tool_call:
             on_tool_call(name, args)
         result = tool_map[name](**args)
@@ -288,7 +292,8 @@ class BaseAgent(ABC):
         on_token: Callable[[str], None] | None,
     ) -> str:
         """Emit final content once for non-streaming providers."""
-        content = self._content_to_text(response.choices[0].message.content)
+        response_any = cast(Any, response)
+        content = self._content_to_text(response_any.choices[0].message.content)
         if on_token and content:
             on_token(content)
         return content
@@ -304,10 +309,12 @@ class BaseAgent(ABC):
     def _parsed_response(
         self,
         response: object,
-        response_schema: Type[pydantic.BaseModel],
+        response_schema: Type[pydantic.BaseModel] | None,
     ) -> SimpleNamespace:
         """Return a response object with message.parsed like FAgent."""
-        raw_content = response.choices[0].message.content or ""
+        response_any = cast(Any, response)
+        raw_content = response_any.choices[0].message.content or ""
+        assert response_schema is not None
         parsed = response_schema.model_validate_json(raw_content)
         return SimpleNamespace(
             choices=[
@@ -325,7 +332,7 @@ class BaseAgent(ABC):
         output_col: str,
         query: str,
         tools: list[Callable],
-        response_schema: Type[pydantic.BaseModel] = None,  # ty:ignore[invalid-parameter-default]
+        response_schema: Type[pydantic.BaseModel] | None = None,
     ) -> pl.DataFrame:
         """
         Runs model inference sequentially one by one on each row
@@ -524,7 +531,7 @@ class OAgent(BaseAgent):
                 kwargs["tools"] = openai_tools
                 kwargs["tool_choice"] = "auto"
             response = self._call_with_retries(
-                lambda: client.chat.completions.create(**kwargs),
+                lambda: client.chat.completions.create(**kwargs),  # ty:ignore[no-matching-overload]
                 step=step,
                 max_retries=max_retries,
             )
@@ -557,7 +564,7 @@ class OAgent(BaseAgent):
 
         if response_schema:
             schema_response = self._call_with_retries(
-                lambda: client.chat.completions.create(
+                lambda: client.chat.completions.create(  # ty:ignore[no-matching-overload]
                     model=self.model_id,
                     messages=list(self._parse_messages(messages)),
                     max_tokens=MISTRAL_CHAT_MAX_TOKENS,
@@ -608,10 +615,10 @@ class FAgent(BaseAgent):
 
     def chat_completion(
         self,
-        chat_history: list[dict] = [],
+        chat_history: list[dict] | None = None,
         session_manager=None,
         tools: list[Callable] | None = None,
-        response_schema: Type[pydantic.BaseModel] = None,
+        response_schema: Type[pydantic.BaseModel] | None = None,
         max_steps: int = 4,
         on_tool_call: Callable[[str, dict], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
@@ -620,11 +627,11 @@ class FAgent(BaseAgent):
     ):
         from types import SimpleNamespace
 
-        messages = list(chat_history)
+        messages = list(chat_history or [])
         mistral_tools = (
             [self._generate_tool_definition(t) for t in tools] if tools else None
         )
-        tool_map = {t.__name__: t for t in tools} if tools else {}
+        tool_map = {getattr(t, "__name__", "tool"): t for t in tools} if tools else {}
 
         client = Mistral(api_key=self.config.MISTRAL_API_KEY, timeout_ms=MISTRAL_TIMEOUT_MS)
 
@@ -656,7 +663,7 @@ class FAgent(BaseAgent):
                                 "step {}; retrying the step without streaming",
                                 step,
                             )
-                            response = client.chat.complete(**kwargs)
+                            response = cast(Any, client.chat.complete(**kwargs))  # ty:ignore[no-matching-overload]
                             msg = response.choices[0].message
                             messages.append(self._assistant_message_dict(msg))
                             msg_tool_calls = msg.tool_calls
@@ -673,7 +680,7 @@ class FAgent(BaseAgent):
                         if tool_calls_list:
                             asst_msg["tool_calls"] = [
                                 {
-                                    "id": tc.id,
+                                    "id": getattr(tc, "id", ""),
                                     "type": "function",
                                     "function": {
                                         "name": tc.function.name,
@@ -701,7 +708,7 @@ class FAgent(BaseAgent):
                         )
                         msg_tool_calls = tool_calls_list
                     else:
-                        response = client.chat.complete(**kwargs)
+                        response = cast(Any, client.chat.complete(**kwargs))  # ty:ignore[no-matching-overload]
                         msg = response.choices[0].message
                         messages.append(self._assistant_message_dict(msg))
                         msg_tool_calls = msg.tool_calls
@@ -737,7 +744,7 @@ class FAgent(BaseAgent):
                     content=tool_content,
                     tool_call_id=tc.id,
                 )
-                messages.append(tool_msg)
+                messages.append(tool_msg)  # ty:ignore[invalid-argument-type]
                 if session_manager:
                     session_manager.add_tool_result_message(tc.id, tool_content)
 
@@ -790,7 +797,7 @@ class FAgent(BaseAgent):
         chat_history: list[dict] = [],
         streaming_response: bool = False,
         tools: list[Callable] | None = None,
-        response_schema: Type[pydantic.BaseModel] = None,
+        response_schema: Type[pydantic.BaseModel] | None = None,
         max_steps: int = 4,
         max_reflections: int = 1,
         reflection_model: str | None = None,

@@ -1,11 +1,9 @@
 from pathlib import Path
-import pathlib
 from dotenv import load_dotenv
 
 from loguru import logger
 from prompt_toolkit import PromptSession
 from rich.console import Console
-from rich.table import Table
 import tiktoken
 
 from src.ai_devs_core import (
@@ -16,9 +14,7 @@ from src.ai_devs_core import (
     complete,
 )
 
-from src.ai_devs_core.session import (
-    BaseSessionManager
-)
+from src.ai_devs_core.session import BaseSessionManager
 
 # Load .env from project root
 env_path = Path(__file__).parent.parent.parent / ".env"
@@ -28,7 +24,7 @@ else:
     print(f"Warning: .env file not found at {env_path}")
 
 config = get_config()
-DATA_SAVE_PATH = pathlib.Path("./data")
+DATA_SAVE_PATH = Path("./data")
 
 SYSTEM_PROMPT = """
 Create a plan to solve the task, analyze it, and then implement it.
@@ -176,7 +172,7 @@ def get_list() -> list[dict]:
     letters = list("ABCDEFGHIJ")[: len(df)]
     df = df.with_columns(pl.Series("letter", letters))
     letter_to_row = {row["letter"]: row for row in df.to_dicts()}
-    return [letter_to_row[l] for l in BONUS_ORDER if l in letter_to_row]
+    return [letter_to_row[letter] for letter in BONUS_ORDER if letter in letter_to_row]
 
 
 def create_native_tools():
@@ -197,11 +193,13 @@ def main():
     agent = FAgent(model_id="mistral-small-latest")
     native_tools = create_native_tools()
     mcp_tools = discover_mcp_tools(MCP_DEFINITIONS)
-    logger.info(f"Using {len(mcp_tools)} MCP tools: {[t.__name__ for t in mcp_tools]}")
+    logger.info(
+        "Using %d MCP tools: %s",
+        len(mcp_tools),
+        [getattr(t, "__name__", "tool") for t in mcp_tools],
+    )
     session_manager = BaseSessionManager(agent=agent, system_prompt=SYSTEM_PROMPT)
     prompt_session = PromptSession("> ", multiline=False)
-
-    table = Table(show_header=True, header_style="bold magenta")
 
     while True:
         try:

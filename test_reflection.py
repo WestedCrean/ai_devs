@@ -3,9 +3,7 @@
 Test script for FAgent.chat_completion_with_reflect method
 """
 
-import os
 from src.ai_devs_core.agent import FAgent
-from src.ai_devs_core.config import get_config
 
 
 def test_reflection_basic():
@@ -13,7 +11,6 @@ def test_reflection_basic():
     print("Testing FAgent.chat_completion_with_reflect...")
     
     # Initialize config and agent
-    config = get_config()
     agent = FAgent(model_id="mistral-small-latest")  # Use smaller model for testing
     
     # Test message
@@ -54,7 +51,7 @@ def test_reflection_with_tools():
     try:
         agent = FAgent(model_id="mistral-small-latest")
         
-        response = agent.chat_completion_with_reflect(
+        agent.chat_completion_with_reflect(
             message="Analyze this data and calculate results using available tools",
             tools=[mock_tool_1, mock_tool_2],
             max_reflections=1

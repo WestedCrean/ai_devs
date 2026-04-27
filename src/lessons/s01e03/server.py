@@ -1,16 +1,13 @@
-import os
-import socket
 from pathlib import Path
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import ngrok
 from loguru import logger
 from contextlib import asynccontextmanager
-from typing import List, Dict
 
-from src.ai_devs_core import FAgent, OAgent, ORAgent, AIDevsClient, Config, get_config
+from src.ai_devs_core import FAgent, AIDevsClient, Config, get_config
 from .session_manager import SessionManager
 from .package_api import PackageAPI
 from .models import ChatRequest, ChatResponse
@@ -27,10 +24,10 @@ config = get_config()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    listener = await run_ngrok_tunnel(3000)
-    await send_api_url_to_hub(listener.url())
+    listener = run_ngrok_tunnel(3000)
+    send_api_url_to_hub(listener.url())
     yield
-    await listener.close()
+    listener.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -48,8 +45,9 @@ session_manager = SessionManager()
 package_api = PackageAPI()
 
 
-def complete(message: str, session: list[dict] = []):
+def complete(message: str, session: list[dict] | None = None):
     # Initialize FAgent
+    session = session or []
     agent = FAgent(model_id="mistral-large-latest")
     # agent = OAgent(
     #     model_id="gemma-4-e4b-uncensored-hauhaucs-aggressive",
@@ -59,7 +57,6 @@ def complete(message: str, session: list[dict] = []):
     # agent = ORAgent(model_id="moonshotai/kimi-k2-thinking")
     # Process with FAgent
     response = agent.chat_completion(
-        message=message,
         chat_history=session,
         tools=[
             package_api.check_package,
@@ -113,31 +110,32 @@ def run_server():
     return port
 
 
-async def run_ngrok_tunnel(port: int):
+def run_ngrok_tunnel(port: int):
     config: Config = get_config()
-    return await ngrok.forward(
+    return ngrok.forward(
         port,
         authtoken=config.NGROK_AUTHTOKEN,
     )
 
 
-async def send_api_url_to_hub(api_url: str) -> any:
+def send_api_url_to_hub(api_url: str) -> dict[str, object]:
     config: Config = get_config()
 
     ai_devs_core = AIDevsClient(
         api_url=config.AI_DEVS_API_URL, api_key=config.AI_DEVS_API_KEY
     )
 
-    logger.info(f"sending api url to hub...")
+    logger.info("sending api url to hub...")
     res = ai_devs_core.verify(
         task="proxy",
-        data={
+        answer={
             "url": f"{api_url}/chat",
             "sessionID": ai_devs_core.get_session_id(),
         },
     )
 
     logger.info(f"Response: {res}")
+    return res
 
 
 if __name__ == "__main__":

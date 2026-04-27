@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Optional, cast
 from dotenv import dotenv_values
 from pydantic import BaseModel
 
@@ -25,7 +25,8 @@ class Config(BaseModel):
 def get_config() -> Config:
     env_path = os.path.join(os.path.dirname(__file__), "../../.env")
     config = dotenv_values(env_path)
-    return Config(**config)
+    normalized = {key: cast(str, value or "") for key, value in config.items()}
+    return Config(**normalized)
 
 
 class BatchJobConfig(BaseModel):

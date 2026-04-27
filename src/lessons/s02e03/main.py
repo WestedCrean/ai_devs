@@ -1,3 +1,4 @@
+import json
 import re
 from collections import Counter
 from datetime import datetime
@@ -165,6 +166,69 @@ def _compile_patterns(patterns: str | None) -> list[re.Pattern[str]]:
 def _split_log_lines(lines: str) -> list[str]:
     """Return non-empty stripped log lines."""
     return [line.strip() for line in lines.splitlines() if line.strip()]
+
+
+def _content_chunks_to_text(content: object) -> str:
+    """Return user-visible text from provider content chunks."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if hasattr(item, "thinking"):
+                continue
+            part = _content_chunks_to_text(item)
+            if part:
+                parts.append(part)
+        return "\n".join(parts)
+
+    text = getattr(content, "text", None)
+    if isinstance(text, str):
+        return text
+
+    nested = getattr(content, "content", None)
+    if nested is not None:
+        return _content_chunks_to_text(nested)
+
+    return str(content)
+
+
+def _extract_reflected_logs(content: object) -> str:
+    """Return reflected log text from plain or accidentally wrapped model output."""
+    text = _content_chunks_to_text(content).strip()
+    if not text:
+        return ""
+
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+    if isinstance(parsed, dict) and isinstance(parsed.get("logs"), str):
+        return parsed["logs"].strip()
+    return text
+
+
+def _fit_log_lines_to_token_budget(logs: str, target_tokens: int) -> str:
+    """Trim reflected logs by whole lines until they fit the token budget."""
+    lines = _split_log_lines(logs)
+    kept: list[str] = []
+    for line in lines:
+        candidate = "\n".join([*kept, line])
+        if count_tokens(candidate) > target_tokens:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _count_file_lines(path: Path) -> int:
@@ -455,12 +519,12 @@ def reflect_failure_memory(target_tokens: int = VERIFY_TOKEN_LIMIT) -> str:
             "add_failure_observations_from_file first."
         )
 
-    memory_agent = failure_memory_agent or FAgent(model_id="mistral-small-latest")
+    memory_agent = failure_memory_agent or FAgent(model_id="mistral-large-latest")
     prompt = f"""
 Compress these candidate power-plant failure log events into the final verify payload.
 
 Hard requirements:
-- Put only the final logs string content in the logs field.
+- Return plain text only. Do not return JSON, Markdown, code fences, commentary, or labels.
 - One line equals one event.
 - Preserve date in YYYY-MM-DD format, time in HH:MM, severity, and component ID.
 - Keep only events relevant to failure analysis: power, cooling, water pumps, software,
@@ -476,11 +540,19 @@ Candidate observations:
 """
     response = memory_agent.chat_completion(
         chat_history=[{"role": "user", "content": prompt}],
-        response_schema=FailureLogCompression,
         max_steps=1,
     )
-    parsed: FailureLogCompression = response.choices[0].message.parsed
-    reflected_failure_logs = parsed.logs.strip()
+    reflected_failure_logs = _extract_reflected_logs(response.choices[0].message.content)
+    reflected_failure_logs = _fit_log_lines_to_token_budget(
+        reflected_failure_logs,
+        target_tokens,
+    )
+    if not reflected_failure_logs:
+        return (
+            "Reflection returned no visible log text. Retry reflect_failure_memory; "
+            "if it repeats, load fewer observations or lower target_tokens."
+        )
+
     token_count = count_tokens(reflected_failure_logs)
 
     preview = reflected_failure_logs[:1_000]
@@ -559,7 +631,7 @@ def main() -> None:
     """Run the interactive failure-log lesson chat."""
     console = Console()
     agent = create_agent("mistral", "mistral-small-latest")
-    memory_agent = FAgent(model_id="mistral-small-latest")
+    memory_agent = FAgent(model_id="mistral-large-latest")
     native_tools = create_native_tools(memory_agent)
     mcp_tools = _discover_safe_mcp_tools()
     logger.info("Using {} native tools: {}", len(native_tools), [t.__name__ for t in native_tools])

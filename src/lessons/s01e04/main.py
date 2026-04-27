@@ -4,8 +4,6 @@ from dotenv import load_dotenv
 from loguru import logger
 from prompt_toolkit import PromptSession
 from rich.console import Console
-from rich.table import Table
-
 from src.ai_devs_core import (
     FAgent,
     AIDevsClient,
@@ -13,6 +11,7 @@ from src.ai_devs_core import (
     discover_mcp_tools,
     complete,
 )
+from src.ai_devs_core.session import BaseSessionManager
 
 # Load .env from project root
 env_path = Path(__file__).parent.parent.parent / ".env"
@@ -62,12 +61,14 @@ def main():
     agent = FAgent(model_id="mistral-small-latest")
     native_tools = create_native_tools()
     mcp_tools = discover_mcp_tools(MCP_DEFINITIONS)
-    logger.info(f"Using {len(mcp_tools)} MCP tools: {[t.__name__ for t in mcp_tools]}")
-    session = [{"role": "system", "content": SYSTEM_PROMPT}]
+    logger.info(
+        "Using %d MCP tools: %s",
+        len(mcp_tools),
+        [getattr(t, "__name__", "tool") for t in mcp_tools],
+    )
+    session_manager = BaseSessionManager(agent=agent, system_prompt=SYSTEM_PROMPT)
 
     prompt_session = PromptSession("> ", multiline=False)
-
-    table = Table(show_header=True, header_style="bold magenta")
 
     while True:
         try:
@@ -78,18 +79,15 @@ def main():
             break
         elif query == "/clear":
             console.print("Clearing the conversation context")
-            session = [{"role": "system", "content": SYSTEM_PROMPT}]
+            session_manager = BaseSessionManager(agent=agent, system_prompt=SYSTEM_PROMPT)
         try:
-            # session is chat_history for this turn; agent adds the user message internally
+            session_manager.add_user_message(query)
             final_response = complete(
-                message=query,
+                session_manager=session_manager,
                 agent=agent,
                 tools=mcp_tools + native_tools,
-                session=session,
             )
-            # Persist both sides so the next turn has full context
-            session.append({"role": "user", "content": query})
-            session.append({"role": "assistant", "content": final_response})
+            session_manager.add_agent_message(final_response)
         except Exception as e:
             logger.error(f"Exception: {e}, ")
             raise e
