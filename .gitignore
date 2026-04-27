@@ -126,3 +126,4 @@ src/lessons/md/*md
 # Data / secrets
 *.json
 *.csv
+md/*.md
