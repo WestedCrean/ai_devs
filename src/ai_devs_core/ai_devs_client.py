@@ -8,9 +8,8 @@ import time
 import httpx
 import pathlib
 from loguru import logger
-from typing import List, Dict, Any
+from typing import Any
 import polars as pl
-from pydantic import json
 
 
 class AIDevsClient:
@@ -36,12 +35,12 @@ class AIDevsClient:
             "Accept": "application/json",
         }
 
-    def _get_api_endpoint(self, endpoint: str) -> str:
+    def _get_api_endpoint(self, endpoint: str) -> httpx.Response:
         full_endpoint_url = f"{self.api_url}/data/{self.api_key}/{endpoint}"
         logger.info(f"GET {full_endpoint_url}")
         return self.client.get(full_endpoint_url, headers=self._headers, timeout=20)
 
-    def _post_api_endpoint(self, endpoint: str, body: dict) -> str:
+    def _post_api_endpoint(self, endpoint: str, body: dict) -> httpx.Response:
         body["apikey"] = self.api_key
         if endpoint != "verify":
             endpoint = f"api/{endpoint}"
@@ -69,7 +68,7 @@ class AIDevsClient:
             logger.info(f"No csv file found. Reading {lesson_code}.json")
             return pl.read_json(f"./outputs/{lesson_code}.json")
 
-    def verify(self, task: str, answer: Dict[str, Any]) -> Dict[str, Any]:
+    def verify(self, task: str, answer: dict[str, Any]) -> dict[str, Any]:
         """
         Send POST {api}/verify to verify response and get flag
         It will send it like that:
@@ -119,7 +118,7 @@ class AIDevsClient:
         response.raise_for_status()
         return response.text
 
-    def download_dataset(
+    def _download_dataset(
         self, dataset: str, save_path: pathlib.Path, download_always=False
     ) -> pathlib.Path:
         """
@@ -127,14 +126,7 @@ class AIDevsClient:
         """
         file_path = save_path / f"{dataset}.csv"
 
-        # check if dataset already was downloaded and if so, just read it
-        if not download_always:
-            try:
-                return pl.read_csv(file_path)
-            except FileNotFoundError:
-                pass
-
-        response = self._get_api_endpoint(endpoint=f"{dataset}.csv")
+        response: httpx.Response = self._get_api_endpoint(endpoint=f"{dataset}.csv")
 
         save_path.mkdir(parents=True, exist_ok=True)
 
@@ -143,6 +135,28 @@ class AIDevsClient:
             f.write(response.text)
 
         return file_path
+
+    def download_dataset_file(
+        self,
+        dataset: str,
+        save_path: pathlib.Path,
+        download_always: bool = False,
+    ) -> pathlib.Path:
+        """Download a dataset CSV file and return its local path.
+
+        Args:
+            dataset: Dataset name without the ``.csv`` suffix.
+            save_path: Directory where the downloaded file should be saved.
+            download_always: Whether to force downloading a fresh copy.
+
+        Returns:
+            Path to the saved CSV file.
+        """
+        return self._download_dataset(
+            dataset=dataset,
+            save_path=save_path,
+            download_always=download_always,
+        )
 
     def get_dataset(
         self,
@@ -154,13 +168,47 @@ class AIDevsClient:
         """
         Download dataset .csv file from api and read it in appropriate mode
         """
-        file_path = self.download_dataset(
-            dataset=dataset, save_path=save_path, download_always=download_always
+
+        file_path = self._download_dataset(
+            dataset=dataset, save_path=save_path, download_always=download_always 
         )
 
         if mode == "string":
             with open(file_path, "r") as f:
                 return f.readlines()
+
+        return pl.read_csv(file_path)
+
+    def get_dataset_as_lines(
+        self,
+        dataset: str,
+        save_path: pathlib.Path,
+        download_always=False,
+    ) -> list[str]:
+        """
+        Download dataset .csv file from api and read it in appropriate mode
+        """
+
+        file_path = self._download_dataset(
+            dataset=dataset, save_path=save_path, download_always=download_always
+        )
+
+        with open(file_path, "r") as f:
+            return f.readlines()
+
+
+    def get_dataset_as_dataframe(
+        self,
+        dataset: str,
+        save_path: pathlib.Path,
+        download_always=False,
+    ) -> pl.DataFrame:
+        """
+        Download dataset .csv file from api and read it as polars dataframe
+        """
+        file_path = self._download_dataset(
+            dataset=dataset, save_path=save_path, download_always=download_always
+        )
 
         return pl.read_csv(file_path)
 
@@ -170,12 +218,12 @@ class AIDevsClient:
         """
         return self._get_api_endpoint(endpoint="findhim_locations.json").json()
 
-    def check_person_location(self, name: str, surname: str) -> dict:
+    def check_person_location(self, name: str, surname: str) -> httpx.Response:
         return self._post_api_endpoint(
             endpoint="location", body={"name": name, "surname": surname}
         )
 
-    def check_person_access(self, name: str, surname: str, birthYear: int) -> dict:
+    def check_person_access(self, name: str, surname: str, birthYear: int) ->  httpx.Response:
         """
         Check person access using /accesslevel endpoint
         """

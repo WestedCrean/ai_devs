@@ -13,23 +13,20 @@ services:
     ports:
       - "8002:8000"
     volumes:
-      - files-data:/data/files
+      - ../../data/mcp-files:/data/files
 
   string-mcp:
     build: ./string
     ports:
       - "8003:8000"
     volumes:
-      - files-data:/data/files
+      - ../../data/mcp-files:/data/files
 
   image-mcp:
     build: ./image
     ports:
       - "8004:8000"
     volumes:
-      - files-data:/data/files
+      - ../../data/mcp-files:/data/files
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-
-volumes:
-  files-data:

@@ -1,6 +1,7 @@
 import json
 from loguru import logger
 from pydantic import BaseModel
+from typing import Protocol
 
 from mistralai.client import Mistral
 
@@ -16,6 +17,7 @@ from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 
 from src.ai_devs_core.agent import BaseAgent
+from src.ai_devs_core.utils import count_tokens
 
 _CONTEXT_SIZES: dict[str, int] = {
     "mistral-small-latest": 131_072,
@@ -59,8 +61,15 @@ class SessionSummary(BaseModel):
     decisions: list[str] = []
     plans: list[str] = []
 
+class SessionManager(Protocol):
+    def get_messages(self) -> list[dict]: ...
+    def add_user_message(self, msg:str) -> None: ...
+    def add_agent_message(self, msg: str) -> None: ...
+    def add_tool_call_message(self, full_content: str, tool_calls_list: list) -> None: ...
+    def add_tool_result_message(self, tool_call_id: str, content: str) -> None: ...
+    def compress(self) -> None: ...
 
-class SessionManager:
+class BaseSessionManager:
     def __init__(self, agent, system_prompt: str):
         self._agent: BaseAgent = agent
         # Store as plain dicts - compatible with the Mistral SDK's chat methods.
@@ -69,10 +78,10 @@ class SessionManager:
         ]
 
     def get_messages(self) -> list[dict]:
-        if self.calculate_occupancy() > self.get_context_size() * 0.4:
+        if self.occupancy > self.context_size * 0.4:
             logger.info(
                 "Context occupancy at %d tokens, compressing session history",
-                self.calculate_occupancy(),
+                self.occupancy,
             )
             self.compress()
 
@@ -114,11 +123,13 @@ class SessionManager:
             {"role": "tool", "tool_call_id": tool_call_id, "content": content}
         )
 
-    def get_context_size(self) -> int:
+    @property
+    def context_size(self) -> int:
         """Return the model's maximum context window in tokens."""
         return _CONTEXT_SIZES.get(self._agent.model_id, 32_768)
 
-    def calculate_occupancy(self) -> int:
+    @property
+    def occupancy(self) -> int:
         """Return the number of tokens currently used by this session."""
         tokenizer = MistralTokenizer.v3()
         mistral_messages = [_to_mistral_common(m) for m in self.messages]
@@ -176,6 +187,27 @@ class SessionManager:
         old = self.messages[1:-10]
 
         summary = self._summarize(old)
+
+        self.messages = [
+            system,
+            {"role": "assistant", "content": f"Conversation memory:\n{summary}"},
+            *recent,
+        ]
+
+class RefinedSessionManager(BaseSessionManager):
+    def compress(self):
+        """Reduce context by keeping the system prompt and the 10 most recent messages.
+
+        Keeps an even tail count to avoid splitting assistant/user turn pairs.
+        """
+        if sum([count_tokens(m.content) for m in self.messages]) <= 1_500:  # ty:ignore[unresolved-attribute]
+            return
+
+        system = self.messages[0]
+        recent = self.messages[-10:]
+        old = self.messages[1:-10]
+
+        summary = super()._summarize(old)
 
         self.messages = [
             system,

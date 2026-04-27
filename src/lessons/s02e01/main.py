@@ -14,7 +14,10 @@ from src.ai_devs_core import (
     get_config,
     discover_mcp_tools,
     complete,
-    SessionManager,
+)
+
+from src.ai_devs_core.session import (
+    BaseSessionManager
 )
 
 # Load .env from project root
@@ -121,7 +124,7 @@ def prompt_critic(prompt_list: list[str]) -> str:
     # if len(prompt_list) < 10:
     #     return "prompt list should equal 10"
     agent = FAgent(model_id="labs-leanstral-2603")
-    session_manager = SessionManager(agent=agent, system_prompt=CRITIC_PROMPT)
+    session_manager = BaseSessionManager(agent=agent, system_prompt=CRITIC_PROMPT)
 
     query = "These are my prompts:"
 
@@ -195,7 +198,7 @@ def main():
     native_tools = create_native_tools()
     mcp_tools = discover_mcp_tools(MCP_DEFINITIONS)
     logger.info(f"Using {len(mcp_tools)} MCP tools: {[t.__name__ for t in mcp_tools]}")
-    session_manager = SessionManager(agent=agent, system_prompt=SYSTEM_PROMPT)
+    session_manager = BaseSessionManager(agent=agent, system_prompt=SYSTEM_PROMPT)
     prompt_session = PromptSession("> ", multiline=False)
 
     table = Table(show_header=True, header_style="bold magenta")
@@ -209,7 +212,7 @@ def main():
             break
         elif query == "/clear":
             console.print("Clearing the conversation context")
-            session_manager = SessionManager(agent=agent, system_prompt=SYSTEM_PROMPT)
+            session_manager = BaseSessionManager(agent=agent, system_prompt=SYSTEM_PROMPT)
         try:
             session_manager.add_user_message(query)
             final_response = complete(

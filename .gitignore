@@ -127,3 +127,4 @@ src/lessons/md/*md
 *.json
 *.csv
 md/*.md
+.codex

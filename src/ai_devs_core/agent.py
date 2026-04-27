@@ -19,6 +19,22 @@ from langfuse import get_client as get_langfuse_client
 from src.ai_devs_core.config import get_config
 from src.ai_devs_core.job_client import RateLimiter, ErrorClassifier
 
+MAX_TOOL_RESULT_CHARS = 12_000
+
+
+def truncate_tool_result(result: object, max_chars: int = MAX_TOOL_RESULT_CHARS) -> str:
+    """Convert a tool result to bounded text for model context."""
+    content = str(result)
+    if len(content) <= max_chars:
+        return content
+
+    suffix = (
+        f"\n\n[Tool result truncated: original_chars={len(content)}, "
+        f"kept_chars={max_chars}]"
+    )
+    keep_chars = max(0, max_chars - len(suffix))
+    return content[:keep_chars] + suffix
+
 
 def _retry_delay(e: Exception, attempt: int, base_max: float = 30) -> float:
     """Return retry delay in seconds. 429 rate-limit errors always wait at least 5s."""
@@ -46,7 +62,7 @@ def tool_logging(func: Callable) -> Callable:
         params = ", ".join(
             [repr(a) for a in args] + [f"{k}={repr(v)}" for k, v in kwargs.items()]
         )
-        logger.info(f"tool call: {func.__name__}({params}) -> {result}")
+        logger.info(f"tool call: {func.__name__}({params}) -> {result}")  # ty:ignore[unresolved-attribute]
         return result
 
     return wrapper
@@ -79,7 +95,7 @@ class BaseAgent(ABC):
         chat_history: list[dict] = [],
         session_manager=None,
         tools: list[Callable] | None = None,
-        response_schema: Type[pydantic.BaseModel] = None,
+        response_schema: Type[pydantic.BaseModel] | None = None, 
         max_steps: int = 4,
         on_tool_call: Callable[[str, dict], None] | None = None,
         on_tool_result: Callable[[str, str], None] | None = None,
@@ -274,17 +290,18 @@ class ORAgent(BaseAgent):
                         if on_tool_call:
                             on_tool_call(tc.function.name, args)
                         result = func(**args)
+                        tool_content = truncate_tool_result(result)
                         if on_tool_result:
-                            on_tool_result(tc.function.name, str(result))
+                            on_tool_result(tc.function.name, tool_content)
                         messages.append(
                             {
                                 "role": "tool",
                                 "tool_call_id": tc.id,
-                                "content": str(result),
+                                "content": tool_content,
                             }
                         )
                         if session_manager:
-                            session_manager.add_tool_result_message(tc.id, str(result))
+                            session_manager.add_tool_result_message(tc.id, tool_content)
 
                 if response_schema:
                     from types import SimpleNamespace
@@ -390,13 +407,14 @@ class OAgent(BaseAgent):
                 if on_tool_call:
                     on_tool_call(tc.function.name, args)
                 result = func(**args)
+                tool_content = truncate_tool_result(result)
                 if on_tool_result:
-                    on_tool_result(tc.function.name, str(result))
+                    on_tool_result(tc.function.name, tool_content)
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": str(result),
+                        "content": tool_content,
                     }
                 )
 
@@ -433,7 +451,7 @@ class FAgent(BaseAgent):
         """Stream one LLM step. Returns (full_content, tool_calls_list)."""
         full_content = ""
         tool_calls_list = None
-
+        time.sleep(1.8)
         with client.chat.stream(**kwargs) as s:
             for event in s:
                 delta = event.data.choices[0].delta
@@ -470,7 +488,7 @@ class FAgent(BaseAgent):
 
         max_retries = 5
         for step in range(max_steps):
-            time.sleep(1.6)
+            time.sleep(1.8)
             kwargs = dict(
                 model=self.model_id,
                 messages=messages,
@@ -552,15 +570,16 @@ class FAgent(BaseAgent):
                 if on_tool_call:
                     on_tool_call(tc.function.name, args)
                 result = func(**args)
+                tool_content = truncate_tool_result(result)
                 if on_tool_result:
-                    on_tool_result(tc.function.name, str(result))
+                    on_tool_result(tc.function.name, tool_content)
                 tool_msg = ToolMessage(
-                    content=str(result),
+                    content=tool_content,
                     tool_call_id=tc.id,
                 )
                 messages.append(tool_msg)
                 if session_manager:
-                    session_manager.add_tool_result_message(tc.id, str(result))
+                    session_manager.add_tool_result_message(tc.id, tool_content)
 
         if response_schema:
             last = messages[-1]

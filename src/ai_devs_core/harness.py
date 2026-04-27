@@ -6,6 +6,10 @@ from collections.abc import Callable
 from rich.console import Console
 from fastmcp import Client
 
+from src.ai_devs_core.session import (
+    SessionManager
+)
+
 console = Console()
 
 _SCHEMA_TYPE_MAP = {
@@ -17,6 +21,22 @@ _SCHEMA_TYPE_MAP = {
 }
 
 
+def _schema_default(value: dict) -> object:
+    """Return a Python signature default from a JSON schema property."""
+    if "default" in value:
+        return value["default"]
+    schema_type = value.get("type")
+    if schema_type == "string":
+        return ""
+    if schema_type == "integer":
+        return 0
+    if schema_type == "number":
+        return 0.0
+    if schema_type == "boolean":
+        return False
+    return None
+
+
 def _make_mcp_callable(url: str, tool) -> Callable:
     """Wrap an MCP tool as a Python callable FAgent can introspect."""
 
@@ -25,16 +45,23 @@ def _make_mcp_callable(url: str, tool) -> Callable:
     props = schema.get("properties", {})
     required = set(schema.get("required", []))
 
-    # Only expose required params to the LLM; optional params use server defaults.
-    params = [
-        inspect.Parameter(
-            k,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            annotation=_SCHEMA_TYPE_MAP.get(v.get("type"), str),
-        )
-        for k, v in props.items()
-        if k in required
+    params = []
+    ordered_props = [
+        *[(k, v) for k, v in props.items() if k in required],
+        *[(k, v) for k, v in props.items() if k not in required],
     ]
+    for key, value in ordered_props:
+        default = (
+            inspect.Parameter.empty if key in required else _schema_default(value)
+        )
+        params.append(
+            inspect.Parameter(
+                key,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                default=default,
+                annotation=_SCHEMA_TYPE_MAP.get(value.get("type"), str),
+            )
+        )
 
     def wrapper(**kwargs):
         async def _call():
@@ -74,7 +101,7 @@ def discover_mcp_tools(mcp_definitions: dict) -> list[Callable]:
 
 
 def complete(
-    session_manager,
+    session_manager: SessionManager,
     agent: any,
     tools: list,
 ) -> str:
