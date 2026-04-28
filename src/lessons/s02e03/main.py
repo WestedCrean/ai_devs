@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 from prompt_toolkit import PromptSession
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from rich.console import Console
 
 from src.ai_devs_core import (
@@ -29,7 +29,6 @@ if env_path.exists():
 else:
     print(f"Warning: .env file not found at {env_path}")
 
-config = get_config()
 DATA_SAVE_PATH = Path("./data")
 MCP_FILES_PATH = DATA_SAVE_PATH / "mcp-files"
 TASK_NAME = "failure"
@@ -74,10 +73,38 @@ MCP_DEFINITIONS = {
 }
 ALLOWED_MCP_TOOLS = {"list_files", "head", "tail", "read_line"}
 
-ai_devs_core = AIDevsClient(
-    api_url=config.AI_DEVS_API_URL,
-    api_key=config.AI_DEVS_API_KEY,
-)
+class _LazyAIDevsClient:
+    """Defer API client construction until a method is used."""
+
+    def __init__(self) -> None:
+        self._client: AIDevsClient | None = None
+
+    def _get_client(self) -> AIDevsClient:
+        if self._client is None:
+            try:
+                config = get_config()
+            except ValidationError as exc:  # pragma: no cover - guarded for runtime UX
+                raise RuntimeError(
+                    "Missing AI Devs environment configuration. Set required env vars "
+                    "or provide a .env file before running this lesson."
+                ) from exc
+            self._client = AIDevsClient(
+                api_url=config.AI_DEVS_API_URL,
+                api_key=config.AI_DEVS_API_KEY,
+            )
+        return self._client
+
+    def get_task(self, *args, **kwargs):
+        return self._get_client().get_task(*args, **kwargs)
+
+    def verify(self, *args, **kwargs):
+        return self._get_client().verify(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(self._get_client(), name)
+
+
+ai_devs_core = _LazyAIDevsClient()
 
 FAILURE_MEMORY_TASK = (
     "Store candidate power-plant failure log events and compress them into the "
