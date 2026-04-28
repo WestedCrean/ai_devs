@@ -18,7 +18,8 @@ src/lessons/        ← runnable lesson scripts - they start with s01e01, s01e02
 - ALL library code lives in `src/ai_devs_core/`.
 - DO NOT create `app/`, `lib/`, `main/`, or top-level `.py` scripts. Put new core code in `src/ai_devs_core/` and runnable scripts in `src/lessons/`.
 - DO NOT move or rename existing modules without explicit instruction.
-- Run lesson scripts with `uv run python -m src.lessons.<script_name>` from the project root
+- Run lesson scripts with `uv run main.py <script_name>` from the project root (for example: `uv run main.py s02e03`).
+- `uv run python -m src.lessons.<script_name>` may still work for simple module lessons, but prefer `main.py` as the canonical runner.
 
 ## Tech stack & conventions
 
@@ -113,4 +114,3 @@ Before finishing any task, review:
 5. Does `uv run ruff check src/ examples/` pass?
 
 If any answer is no, fix it before completing the task.
-
