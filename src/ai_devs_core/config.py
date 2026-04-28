@@ -25,7 +25,8 @@ class Config(BaseModel):
 def get_config() -> Config:
     env_path = os.path.join(os.path.dirname(__file__), "../../.env")
     config = dotenv_values(env_path)
-    normalized = {key: cast(str, value or "") for key, value in config.items()}
+    merged = {**config, **os.environ}
+    normalized = {key: cast(str, value or "") for key, value in merged.items()}
     return Config(**normalized)
 
 
