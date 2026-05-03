@@ -2,6 +2,8 @@
 AIDevsClient for interacting with the AIDevs hub API.
 """
 
+from dns.e164 import query
+
 import uuid
 import time
 
@@ -40,10 +42,15 @@ class AIDevsClient:
         logger.info(f"GET {full_endpoint_url}")
         return self.client.get(full_endpoint_url, headers=self._headers, timeout=20)
 
-    def _post_api_endpoint(self, endpoint: str, body: dict) -> httpx.Response:
+    def _post_api_endpoint(
+        self, endpoint: str, body: dict, query_str: str | None = None
+    ) -> httpx.Response:
         body["apikey"] = self.api_key
         if endpoint != "verify":
             endpoint = f"api/{endpoint}"
+
+        if query_str:
+            endpoint += f"&{query_str}"
 
         full_endpoint_url = f"{self.api_url}/{endpoint}"
         logger.info(f"POST {full_endpoint_url} {body}")
@@ -170,7 +177,7 @@ class AIDevsClient:
         """
 
         file_path = self._download_dataset(
-            dataset=dataset, save_path=save_path, download_always=download_always 
+            dataset=dataset, save_path=save_path, download_always=download_always
         )
 
         if mode == "string":
@@ -195,7 +202,6 @@ class AIDevsClient:
 
         with open(file_path, "r") as f:
             return f.readlines()
-
 
     def get_dataset_as_dataframe(
         self,
@@ -223,7 +229,9 @@ class AIDevsClient:
             endpoint="location", body={"name": name, "surname": surname}
         )
 
-    def check_person_access(self, name: str, surname: str, birthYear: int) -> httpx.Response:
+    def check_person_access(
+        self, name: str, surname: str, birthYear: int
+    ) -> httpx.Response:
         """
         Check person access using /accesslevel endpoint
         """

@@ -22,6 +22,7 @@ dependencies = [
     "openai>=1.40.0",
     "openrouter>=0.8.1",
     "fastmcp>=3.2.4",
+    "floppers @ git+ssh://git@github.com/WestedCrean/observational-memory-harness.git",
     "rich>=14.3.3",
     "duckdb>=1.5.2",
     "tiktoken>=0.12.0",
@@ -40,4 +41,3 @@ dev = [
 members = [
     "src/mcp/files",
 ]
-
