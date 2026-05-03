@@ -1,4 +1,3 @@
-import string
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -10,14 +9,11 @@ import flop
 
 from src.ai_devs_core import (
     AIDevsClient,
-    FAgent,
-    complete,
     discover_mcp_tools,
     get_config,
 )
-from src.ai_devs_core.session import BaseSessionManager
 
-env_path = Path(__file__).parent.parent.parent / ".env"
+env_path = Path(__file__).parents[3] / ".env"
 if env_path.exists():
     load_dotenv(env_path)
 else:
@@ -61,22 +57,23 @@ def query_help():
 
 
 def query_mailbox_server(
-    action: str = "help", page: int = 1, additional_params: None = None
+    action: str = "help",
+    parameters: dict[str, str | int | float | bool | None] | None = None,
 ):
     """
-    Query mailbox server with a given action
+    Query mailbox server with a given action.
 
     Params:
         action - action to do on the server. Defaults to "help" - discover more by calling help.
-        page - page for pagination
-        additional_params - optionally add additional params to list endpoints, supports operators: from:, to:, subject:, OR, AND. Example: "from:example@example.com AND subject:'example subject'"
+        parameters - optional action parameters discovered from help. Each key/value is added
+            to the request body alongside action.
     """
+    body = {"action": action, **(parameters or {})}
     logger.info("Subagent queries mailbox server with params:")
-    logger.info(
-        f"action: {action}, page: {page}, additional_params: {additional_params}"
-    )
+    logger.info(body)
     return ai_devs_core._post_api_endpoint(
-        "zmail", body={"action": action, "page": page}, query_str=additional_params
+        "zmail",
+        body=body,
     )
 
 
@@ -96,7 +93,6 @@ def create_subagent(prompt: str) -> str:
     """
     Run subagent with access to mail_server tool to fulfull a task. Returns agent output.
     """
-    logger.info(f"Running subagent with query: {prompt}")
     return flop.run_once(
         query=f"""
             You are solving task `mailbox` with iterative function-calling.
@@ -117,7 +113,12 @@ def create_subagent(prompt: str) -> str:
 
 def create_native_tools() -> list:
     """Return native tools exposed to the lesson agent."""
-    return [create_subagent, query_help, verify_mailbox_answer]
+    return [
+        query_help,
+        query_mailbox_server,
+        verify_mailbox_answer,
+        create_subagent,
+    ]
 
 
 def main() -> None:
@@ -131,12 +132,13 @@ def main() -> None:
     prompt_session = PromptSession("> ", multiline=False)
 
     ask = flop.create_runner(
+        model="mistral-large-latest",
         system_prompt=SYSTEM_PROMPT,
         tools=native_tools,
-        model="mistral-large-latest",
-        verbose=True,
         iteration_limit=120,
+        verbose=True,
     )
+
     while True:
         try:
             query = prompt_session.prompt()
@@ -146,19 +148,9 @@ def main() -> None:
             break
         if query == "/clear":
             console.print("Clearing the conversation context")
-            # session_manager = BaseSessionManager(
-            #     agent=agent, system_prompt=SYSTEM_PROMPT
-            # )
             continue
 
-        # session_manager.add_user_message(query)
-        # final_response = complete(
-        #     session_manager=session_manager,
-        #     agent=agent,
-        #     tools=mcp_tools + native_tools,
-        # )
-        # session_manager.add_agent_message(final_response)
-        ask(query)
+        console.print(ask(query))
 
 
 if __name__ == "__main__":

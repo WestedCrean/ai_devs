@@ -53,10 +53,10 @@ class AIDevsClient:
             endpoint += f"&{query_str}"
 
         full_endpoint_url = f"{self.api_url}/{endpoint}"
-        logger.info(f"POST {full_endpoint_url} {body}")
         res = self.client.post(
             full_endpoint_url, headers=self._headers, json=body, timeout=20
-        )
+        ).json()
+        logger.info(f"POST {full_endpoint_url} {body} -> {res}")
         return res
 
     def save_lesson_output(self, lesson_code: str, df: pl.DataFrame):
