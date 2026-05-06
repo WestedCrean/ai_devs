@@ -6,7 +6,7 @@ from dns.e164 import query
 
 import uuid
 import time
-
+import functools
 import httpx
 import pathlib
 from loguru import logger
@@ -185,6 +185,17 @@ class AIDevsClient:
                 return pl.DataFrame({"line": f.readlines()})
 
         return pl.read_csv(file_path)
+
+    @functools.cache
+    def get_raw_dataset(
+        self,
+        dataset: str,
+    ):
+        """
+        Download raw dataset from api and read it in appropriate mode
+        """
+
+        return self._get_api_endpoint(endpoint=dataset)
 
     def get_dataset_as_lines(
         self,

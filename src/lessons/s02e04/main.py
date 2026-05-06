@@ -22,7 +22,7 @@ else:
 config = get_config()
 
 SYSTEM_PROMPT = """
-You are playing a CTF style game - task `mailbox` with iterative function-calling.
+You are a helpful search assistant, playing a CTF style game - task `mailbox` with iterative function-calling.
 We got access to a mailbox server and are searching for traitor with the name Wiktor.
 We don't know his suurname, but we know he snitched. We need to search the mail server through an API and get three pieces of information:
 - date - when (YYYY-MM-DD) security chapter will launch an offensive against our power plant
@@ -31,14 +31,9 @@ We don't know his suurname, but we know he snitched. We need to search the mail 
 
 The mailbox server is in constant use - during your work its contents may change, you must include it in your plan.
 
-Workflow:
-1. Start with `query_help()` tool.
-2. Plan work - split it between subagents using `create_subagent()` tool with prompt parameter.
-3. Iterate pages and filters; mailbox is active and may change over time.
-4. Read full messages before drawing conclusions.
-5. Verify progress with hub feedback and continue until all required values are correct.
-
 Never invent mailbox content. Use tool output only.
+
+And always follow user instructions.
 """
 
 
@@ -77,15 +72,24 @@ def query_mailbox_server(
     )
 
 
-def verify_mailbox_answer(password: str, date: str, confirmation_code: str) -> dict:
-    """Send candidate mailbox answer to the hub verify endpoint."""
+def verify_mailbox_answer(
+    password: str = "", date: str = "", confirmation_code: str = ""
+) -> dict:
+    """
+    Send candidate mailbox answer to the hub verify endpoint.
+    If it returns something like FLG:(a-zA-Z0-9)+ the it's the flag and we finished successfully 🎉
+    """
+    payload = {}
+    if password != "":
+        payload["password"] = password
+    if date != "":
+        payload["password"] = date
+    if confirmation_code != "":
+        payload["password"] = confirmation_code
+
     return ai_devs_core.verify(
         "mailbox",
-        {
-            "password": password,
-            "date": date,
-            "confirmation_code": confirmation_code,
-        },
+        payload,
     )
 
 
@@ -117,7 +121,7 @@ def create_native_tools() -> list:
         query_help,
         query_mailbox_server,
         verify_mailbox_answer,
-        create_subagent,
+        # create_subagent,
     ]
 
 
